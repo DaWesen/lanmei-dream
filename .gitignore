@@ -1,0 +1,11 @@
+/lanmei-epoch
+*.exe
+*.test
+
+/vendor/
+
+/.vscode/
+/.idea/
+*.swp
+*.swo
+*~
