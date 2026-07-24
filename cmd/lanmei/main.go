@@ -10,11 +10,13 @@ import (
 	"syscall"
 
 	"github.com/DaWesen/lanmei-dream/internal/ai"
+	"github.com/DaWesen/lanmei-dream/internal/ai/embedding"
+	"github.com/DaWesen/lanmei-dream/internal/ai/llm"
+	"github.com/DaWesen/lanmei-dream/internal/ai/memory"
 	"github.com/DaWesen/lanmei-dream/internal/bot"
 	"github.com/DaWesen/lanmei-dream/internal/command"
 	"github.com/DaWesen/lanmei-dream/internal/database"
-	"github.com/DaWesen/lanmei-dream/internal/plugin/roleplay"
-	"github.com/DaWesen/lanmei-dream/internal/plugin/signin"
+	"github.com/DaWesen/lanmei-dream/internal/signin"
 )
 
 func main() {
@@ -40,7 +42,7 @@ func main() {
 	milvusColl := env("MILVUS_COLLECTION", "lanmei_memories")
 	embeddingDim := envInt("EMBEDDING_DIM", 1024)
 
-	memStore, err := ai.NewMilvusMemoryStore(ctx, milvusAddr, milvusColl, embeddingDim)
+	memStore, err := memory.NewMilvusMemoryStore(ctx, milvusAddr, milvusColl, embeddingDim)
 	if err != nil {
 		log.Printf("⚠ Milvus 连接失败，RAG 将不可用: %v", err)
 	}
@@ -51,20 +53,14 @@ func main() {
 
 	// ── AI 对话服务 ──
 	// TODO: 等用户指定 LLM 和 Embedding 提供方后，在此初始化具体实现
-	//   var llmClient ai.LLMClient = xxx.NewClient(...)
-	//   var embedder  ai.Embedder  = xxx.NewEmbedder(...)
-	//
-	// 目前 LLMClient / Embedder 接口已定义但无实现，
-	// 角色扮演功能暂时不可用，命令系统正常工作。
 	var (
-		llmClient ai.LLMClient // = nil，待注入
-		embedder  ai.Embedder  // = nil，待注入
+		llmClient llm.LLMClient
+		embedder  embedding.Embedder
 	)
 
-	var rp *roleplay.Plugin
+	var chatSvc *ai.ChatService
 	if llmClient != nil && embedder != nil {
-		chatSvc := ai.NewChatService(llmClient, embedder, memStore)
-		rp = roleplay.New(chatSvc, db)
+		chatSvc = ai.NewChatService(llmClient, embedder, memStore, db)
 		log.Println("AI 对话服务就绪")
 	} else {
 		log.Println("⚠ LLM/Embedding 未配置，角色扮演不可用（命令系统正常）")
@@ -84,7 +80,7 @@ func main() {
 		Handler:     cmdSys.HelpHandler,
 	})
 
-	// ── ZeroBot ──
+	// ── ZeroBot + Conduit ──
 	wsURL := env("WS_URL", "ws://127.0.0.1:3001")
 	accessToken := os.Getenv("ACCESS_TOKEN")
 	nick := env("BOT_NICKNAME", "蓝妹")
@@ -95,7 +91,7 @@ func main() {
 		AccessToken:  accessToken,
 		NickName:     nick,
 		SuperUsers:   superUsers,
-	}, cmdSys, rp)
+	}, cmdSys, chatSvc, db)
 
 	// 优雅退出
 	go func() {

@@ -5,42 +5,49 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
-// DB 封装 PostgreSQL 连接池
+// DB 封装 GORM 数据库连接
 type DB struct {
-	Pool *pgxpool.Pool
+	Orm *gorm.DB
 }
 
-// Connect 创建连接池并验证连通性
+// Connect 创建 GORM 连接并验证连通性
 func Connect(ctx context.Context, connString string) (*DB, error) {
-	cfg, err := pgxpool.ParseConfig(connString)
+	orm, err := gorm.Open(postgres.Open(connString), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Warn),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("parse pg config: %w", err)
+		return nil, fmt.Errorf("gorm open: %w", err)
 	}
 
-	cfg.MaxConns = 20
-	cfg.MinConns = 2
-	cfg.MaxConnLifetime = time.Hour
-	cfg.MaxConnIdleTime = 30 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	sqlDB, err := orm.DB()
 	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
+		return nil, fmt.Errorf("get sql.DB: %w", err)
 	}
+
+	sqlDB.SetMaxOpenConns(20)
+	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxIdleTime(30 * time.Minute)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
+	if err := sqlDB.PingContext(pingCtx); err != nil {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	return &DB{Pool: pool}, nil
+	return &DB{Orm: orm}, nil
 }
 
-// Close 关闭连接池
+// Close 关闭连接
 func (db *DB) Close() {
-	db.Pool.Close()
+	sqlDB, err := db.Orm.DB()
+	if err != nil {
+		return
+	}
+	sqlDB.Close()
 }
