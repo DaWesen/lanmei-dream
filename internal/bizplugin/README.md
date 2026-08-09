@@ -28,7 +28,7 @@ NormalizedMessage（+ EventType / EventSubType / EventData）
   │  ③ 插件子树（第一层，优先）← 事件类插件在这里消费
   │     （未被插件接住的事件会继续滑向后继分支直至意图分析——因此事件插件必须存在）
   ▼
-插件管线 → AppendOutput → makeEventCallback → 网关发回群
+插件管线 → AppendOutput → makeRichContentCallback → 网关发回群
 ```
 
 ### 1. 上游：事件接收通道（gateway 层，一般无需改动）
@@ -49,7 +49,7 @@ NormalizedMessage（+ EventType / EventSubType / EventData）
 | `bot.event.sub_type` | string | 事件子类型，如 `approve` / `invite` |
 | `bot.event.data` | map[string]any | 事件全字段（user_id / group_id / operator_id / sub_type 等）|
 
-事件消息由事件专用回调 `makeEventCallback` 处理：处理出错只记日志不回复；正常完成时遍历输出发送（插件的欢迎文案由此发出）。
+事件消息由富文本发送回调 `makeRichContentCallback` 处理：处理出错只记日志不回复；正常完成时若插件写入了富文本键 `bot.rich.content`（map：`text` / `at` / `image`，见 `internal/bot/passes.go` 的 `KeyRichContent`）则按富文本发送，否则遍历输出发送纯文本（插件的欢迎文案由此发出）。
 
 ### 3. 下游：插件消费（本包，以 welcome 为模范示例）
 
@@ -182,4 +182,4 @@ go run ./cmd/lanmei
 - `github.com/zrurf/conduit` — 引擎、行为树、管线（`MessageContext.Extra` 即黑板）
 - `internal/gateway` — 事件归一化与事件键契约（`notice.go`、`message.go`）
 - `internal/plugin` — 插件接口与资源注册（`PluginContext` / `PassID` / `PipelineID` / `StoreKey`）
-- `internal/bot` — 事件写入黑板（`OnMessage` 分流、`makeEventCallback`、事件键定义）
+- `internal/bot` — 事件写入黑板（`OnMessage` 分流、`makeRichContentCallback`、事件键定义）

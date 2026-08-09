@@ -127,6 +127,20 @@ func (h *Hub) SendAtText(connID string, msg *NormalizedMessage, atUserID, text s
 	return h.SendSegments(connID, msg, segs)
 }
 
+// SendRichContent 向指定连接发送富文本消息（文本 + 可选 @ + 可选图片，自动选择协议动作）。
+// content.At 为空时不 @，content.Image 为空时不发图。
+func (h *Hub) SendRichContent(connID string, msg *NormalizedMessage, content RichContent) error {
+	segs := make([]NormalizedSegment, 0, 3)
+	if content.At != "" {
+		segs = append(segs, NormalizedSegment{Type: "at", Data: map[string]string{"user_id": content.At}})
+	}
+	segs = append(segs, NormalizedSegment{Type: "text", Text: content.Text})
+	if content.Image != "" {
+		segs = append(segs, NormalizedSegment{Type: "image", Data: map[string]string{"file": content.Image}})
+	}
+	return h.SendSegments(connID, msg, segs)
+}
+
 // All 返回所有活跃连接的快照
 func (h *Hub) All() []*Connection {
 	h.mu.RLock()

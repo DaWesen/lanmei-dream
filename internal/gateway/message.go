@@ -593,6 +593,16 @@ func ToMessageSegmentV11(segs []NormalizedSegment) []MessageSegmentV11 {
 	return result
 }
 
+// ── 富文本发送内容 ──
+
+// RichContent 富文本发送内容：一段文本 + 可选 @ 用户 + 可选图片。
+// At / Image 为空时对应消息段不生成（空 At = 不 @，空 Image = 不发图）。
+type RichContent struct {
+	Text  string // 文本内容
+	At    string // @ 目标用户 ID（空 = 不 @）
+	Image string // 图片 file（URL / 本地路径 / base64，空 = 不发图）
+}
+
 // ── 辅助函数 ──
 
 // formatIntOrString 将值格式化为字符串（处理 JSON number 或 string）

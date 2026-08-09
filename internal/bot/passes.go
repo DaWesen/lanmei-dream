@@ -37,6 +37,9 @@ const (
 	KeyImageDesc    = "bot.image_desc"    // string 图片理解描述
 	KeyMediaHandled = "bot.media_handled" // bool 媒体已处理（RouterPass 路由依据）
 
+	// ── 富文本输出（data，插件经 conduit.Set 写入，makeRichContentCallback 读取）──
+	KeyRichContent = "bot.rich.content" // map[string]any{text/at/image} 富文本发送内容（无键走纯文本）
+
 	// ── 群聊话题（TopicGatePass 写入，供对话管线消费）──
 	KeyTopicID      = "bot.topic.id"      // string 命中话题 ID（data）
 	KeyTopicLabel   = "bot.topic.label"   // string 话题描述（data）

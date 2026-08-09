@@ -309,7 +309,7 @@ func (b *Bot) OnMessage(msg *gateway.NormalizedMessage) {
 	// 事件消息（notice/request）：出错也绝不向群里发消息（事件落空发"迷糊话术"是 bug）
 	isEvent := msg.MessageType == gateway.MessageTypeNotice || msg.MessageType == gateway.MessageTypeRequest
 	if isEvent {
-		input.ResponseCallback = b.makeEventCallback(msg)
+		input.ResponseCallback = b.makeRichContentCallback(msg)
 	} else {
 		input.ResponseCallback = b.makeResponseCallback(msg)
 	}
@@ -322,9 +322,11 @@ func (b *Bot) OnMessage(msg *gateway.NormalizedMessage) {
 	}
 }
 
-// makeEventCallback 构造通知事件专用回调：事件处理出错时只记日志、绝不回复；
-// 正常完成时遍历 Output 发送（供未来事件消费插件写入输出，如入群欢迎）。
-func (b *Bot) makeEventCallback(msg *gateway.NormalizedMessage) func(*conduit.MessageContext, error) {
+// makeRichContentCallback 构造富文本发送回调，与 makeResponseCallback 平级：
+// 插件经富文本键（KeyRichContent）输出 "文本 + @ + 图片" 组合消息时按富文本发送；
+// 未提供富文本内容时遍历 Output 发送纯文本（兼容原事件回调行为）。
+// 处理出错时只记日志、绝不回复（事件保持静默，不向群里发消息）。
+func (b *Bot) makeRichContentCallback(msg *gateway.NormalizedMessage) func(*conduit.MessageContext, error) {
 	return func(ctx *conduit.MessageContext, err error) {
 		if err != nil {
 			b.logger.Error("bot: event process failed",
@@ -334,10 +336,58 @@ func (b *Bot) makeEventCallback(msg *gateway.NormalizedMessage) func(*conduit.Me
 			)
 			return
 		}
+		if content, ok := richContentFromCtx(ctx); ok {
+			if !b.replyAllowed(msg) {
+				return
+			}
+			if err := b.gw.Hub().SendRichContent(msg.ConnID, msg, content); err != nil {
+				b.logger.Error("bot: 富文本回复失败", zap.String("conn", msg.ConnID), zap.Error(err))
+			}
+			return
+		}
 		for _, out := range ctx.Output {
 			b.reply(msg, out.Content)
 		}
 	}
+}
+
+// richContentFromCtx 读取插件写入的富文本发送内容（KeyRichContent）。
+// 键不存在、类型不符或内容全空时返回 false，调用方走纯文本兜底。
+func richContentFromCtx(ctx *conduit.MessageContext) (gateway.RichContent, bool) {
+	raw, ok := conduit.Get[map[string]any](ctx, KeyRichContent)
+	if !ok {
+		return gateway.RichContent{}, false
+	}
+	content := gateway.RichContent{}
+	if v, ok := raw["text"].(string); ok {
+		content.Text = v
+	}
+	if v, ok := raw["at"].(string); ok {
+		content.At = v
+	}
+	if v, ok := raw["image"].(string); ok {
+		content.Image = v
+	}
+	// 内容全空视为无效（如键名写错/空 map），交由调用方走纯文本兜底
+	if content.Text == "" && content.At == "" && content.Image == "" {
+		return gateway.RichContent{}, false
+	}
+	return content, true
+}
+
+// replyAllowed 检查回复限流（群配额 + 全局配额），超限时静默丢弃返回 false。
+// limiter 为 nil 时放行。
+func (b *Bot) replyAllowed(msg *gateway.NormalizedMessage) bool {
+	if b.limiter == nil {
+		return true
+	}
+	ctx := context.Background()
+	if !b.limiter.AllowGroupReply(ctx, msg.GroupID) || !b.limiter.AllowTotalReply(ctx) {
+		b.logger.Debug("bot: 回复限流，静默丢弃",
+			zap.String("group", msg.GroupID), zap.String("conn", msg.ConnID))
+		return false
+	}
+	return true
 }
 
 // makeResponseCallback 构造消息级回调，处理两种情况：
