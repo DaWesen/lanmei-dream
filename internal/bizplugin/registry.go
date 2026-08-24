@@ -175,13 +175,8 @@ func (r *BusinessRegistry) RegisterBuiltins() error {
 		return err
 	}
 
-	// ── 随机小游戏插件（猜拳、骰子）──
-	if err := register(builtins.RandomGames, "random_games", NewRandomGamesPlugin()); err != nil {
-		return err
-	}
-
 	// ── 编程答题游戏插件──
-	if err := register(builtins.GuessNumber, "guess_number", NewGuessNumberPlugin(r.quizDir)); err != nil {
+	if err := register(builtins.AnswerQuestion, "answer_question", NewAnswerQuestionPlugin(r.quizDir)); err != nil {
 		return err
 	}
 

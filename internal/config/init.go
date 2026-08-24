@@ -154,8 +154,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("plugin.builtins.poke", true)
 	v.SetDefault("plugin.builtins.three_g", true)
 	v.SetDefault("plugin.builtins.turtle_soup", true)
-	v.SetDefault("plugin.builtins.random_games", true)
-	v.SetDefault("plugin.builtins.guess_number", true)
+	v.SetDefault("plugin.builtins.answer_question", true)
 	v.SetDefault("plugin.builtins.daily_quote", true)
 
 	// 群聊 topic 系统默认值

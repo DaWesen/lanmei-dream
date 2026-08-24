@@ -18,7 +18,7 @@ type Context struct {
 	Message        string   // 原始消息
 	Reply          func(string)
 	// ReplySegments 回传 OneBot 原生消息段；主要用于插件命令经自然语言意图
-	// 重入行为树后，将子消息上下文中的 at/rps/dice 等段传回原始消息。
+	// 重入行为树后，将子消息上下文中的 at 等段传回原始消息。
 	ReplySegments func([]map[string]any)
 	// SuppressRequesterAt 禁止 Bot 为本次命令文本回复自动添加 @请求者。
 	SuppressRequesterAt func()

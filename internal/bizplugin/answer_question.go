@@ -22,10 +22,10 @@ import (
 )
 
 // ============================================================
-// GuessNumberPlugin 编程答题插件
+// AnswerQuestionPlugin 编程答题插件
 // ============================================================
 
-// GuessNumberPlugin 保留历史类型名、插件 ID 和配置键，当前实现新手编程答题游戏：
+// AnswerQuestionPlugin 实现新手编程答题游戏：
 //   - /答题：从全部支持语言中开始五题混合答题
 //   - /答题 java：选择一种语言，可用空格同时选择多种语言
 //   - A / B / C / D：在当前题目中抢答
@@ -36,15 +36,15 @@ import (
 //
 // 行为树：
 //
-//	subtree.guess_number → Selector(
-//	  Sequence(isQuizCommand,             Action("pipeline.plugin.guess_number.main")),
-//	  Sequence(pass.isActiveQuizAnswer, Action("pipeline.plugin.guess_number.main")),
+//	subtree.answer_question → Selector(
+//	  Sequence(isQuizCommand,             Action("pipeline.plugin.answer_question.main")),
+//	  Sequence(pass.isActiveQuizAnswer, Action("pipeline.plugin.answer_question.main")),
 //	)
 //
 // 管线：
 //
-//	pipeline.plugin.guess_number.main → [quizPass]
-type GuessNumberPlugin struct {
+//	pipeline.plugin.answer_question.main → [quizPass]
+type AnswerQuestionPlugin struct {
 	kv      *database.PluginKVStore
 	quizDir string
 	logger  *zap.Logger
@@ -53,27 +53,27 @@ type GuessNumberPlugin struct {
 	watcher *quizBankWatcher
 }
 
-// NewGuessNumberPlugin 创建编程答题插件。quizDir 为题库根目录（语言子目录）。
-func NewGuessNumberPlugin(quizDir string) *GuessNumberPlugin {
-	return &GuessNumberPlugin{quizDir: quizDir}
+// NewAnswerQuestionPlugin 创建编程答题插件。quizDir 为题库根目录（语言子目录）。
+func NewAnswerQuestionPlugin(quizDir string) *AnswerQuestionPlugin {
+	return &AnswerQuestionPlugin{quizDir: quizDir}
 }
 
 // Info 返回编程答题插件元信息。
-func (p *GuessNumberPlugin) Info() pluginpkg.PluginInfo {
+func (p *AnswerQuestionPlugin) Info() pluginpkg.PluginInfo {
 	return pluginpkg.PluginInfo{
-		ID:          "guess_number",
+		ID:          "answer_question",
 		Name:        "编程答题",
 		Description: "多语言新手选择题抢答（每轮五题、每题两次机会，题库可由 quizdata 目录扩展）",
 		Version:     "2.2.0",
 		Commands: []pluginpkg.CommandDef{
 			{Name: "答题", Description: "开始编程选择题，可指定语言与难度，例如：/答题 go python 困难", Order: 133},
 		},
-		SubtreeID: pluginpkg.SubtreeID("guess_number"),
+		SubtreeID: pluginpkg.SubtreeID("answer_question"),
 	}
 }
 
 // OnInit 加载题库并注册编程答题 Pass、Pipeline 和 Subtree。
-func (p *GuessNumberPlugin) OnInit(ctx *pluginpkg.PluginContext) error {
+func (p *AnswerQuestionPlugin) OnInit(ctx *pluginpkg.PluginContext) error {
 	p.kv = ctx.KV
 	p.logger = ctx.Logger
 
@@ -90,17 +90,17 @@ func (p *GuessNumberPlugin) OnInit(ctx *pluginpkg.PluginContext) error {
 	p.bank.Store(bank)
 	p.pass = newQuizPass(p.kv, &p.bank)
 
-	passID := pluginpkg.PassID("guess_number", "main")
+	passID := pluginpkg.PassID("answer_question", "main")
 	if err := ctx.Engine.RegisterPass(passID, p.pass); err != nil {
-		return fmt.Errorf("register guess_number pass: %w", err)
+		return fmt.Errorf("register answer_question pass: %w", err)
 	}
-	ctx.Registry.TrackPass("guess_number", passID)
+	ctx.Registry.TrackPass("answer_question", passID)
 
-	pipelineID := pluginpkg.PipelineID("guess_number", "main")
+	pipelineID := pluginpkg.PipelineID("answer_question", "main")
 	if err := ctx.Engine.RegisterPipeline(conduit.NewPipelineFromIDs(pipelineID, passID)); err != nil {
-		return fmt.Errorf("register guess_number pipeline: %w", err)
+		return fmt.Errorf("register answer_question pipeline: %w", err)
 	}
-	ctx.Registry.TrackPipeline("guess_number", pipelineID)
+	ctx.Registry.TrackPipeline("answer_question", pipelineID)
 
 	subtree := conduit.NewSelector(
 		conduit.NewSequence(
@@ -112,14 +112,14 @@ func (p *GuessNumberPlugin) OnInit(ctx *pluginpkg.PluginContext) error {
 			conduit.NewAction(pipelineID),
 		),
 	)
-	if err := ctx.Engine.RegisterSubtree(pluginpkg.SubtreeID("guess_number"), subtree); err != nil {
-		return fmt.Errorf("register guess_number subtree: %w", err)
+	if err := ctx.Engine.RegisterSubtree(pluginpkg.SubtreeID("answer_question"), subtree); err != nil {
+		return fmt.Errorf("register answer_question subtree: %w", err)
 	}
 	return nil
 }
 
 // OnStart 启动题库目录监听，支持热更新（文件变更会整体替换题库快照）。
-func (p *GuessNumberPlugin) OnStart(_ *pluginpkg.PluginContext) error {
+func (p *AnswerQuestionPlugin) OnStart(_ *pluginpkg.PluginContext) error {
 	if p.quizDir == "" {
 		return nil
 	}
@@ -135,7 +135,7 @@ func (p *GuessNumberPlugin) OnStart(_ *pluginpkg.PluginContext) error {
 }
 
 // OnStop 停止题库目录监听、所有题目计时器与异步消息通道。
-func (p *GuessNumberPlugin) OnStop(_ *pluginpkg.PluginContext) error {
+func (p *AnswerQuestionPlugin) OnStop(_ *pluginpkg.PluginContext) error {
 	if p.watcher != nil {
 		p.watcher.close()
 		p.watcher = nil
@@ -147,7 +147,7 @@ func (p *GuessNumberPlugin) OnStop(_ *pluginpkg.PluginContext) error {
 }
 
 // reloadBank 重新加载题库并原子替换；失败时保留旧题库，保证正在进行的轮次不受影响。
-func (p *GuessNumberPlugin) reloadBank() {
+func (p *AnswerQuestionPlugin) reloadBank() {
 	bank, err := loadQuizBank(p.quizDir)
 	if err != nil {
 		if p.logger != nil {
@@ -763,8 +763,8 @@ func parseQuizChoice(raw string) (int, bool) {
 // ============================================================
 
 const (
-	// quizPluginID 沿用历史插件命名空间，避免破坏已有启用配置。
-	quizPluginID = "guess_number"
+	// quizPluginID 受限 KV 存储命名空间。
+	quizPluginID = "answer_question"
 	// quizQuestionCount 每轮固定题数。
 	quizQuestionCount = 5
 	// quizQuestionTimeout 每道题的固定作答时间。
@@ -1045,7 +1045,7 @@ func (pass *quizPass) start(ctx *conduit.MessageContext, rawLanguages string) er
 	key := quizKey(ctx.GroupID, ctx.UserID)
 	existing, expired, err := pass.load(ctx.Ctx, key)
 	if err != nil {
-		return fmt.Errorf("guess_number: load quiz: %w", err)
+		return fmt.Errorf("answer_question: load quiz: %w", err)
 	}
 	prefix := ""
 	if existing != nil && !expired {
@@ -1054,13 +1054,13 @@ func (pass *quizPass) start(ctx *conduit.MessageContext, rawLanguages string) er
 			return nil
 		}
 		if err := pass.kv.Delete(ctx.Ctx, quizPluginID, key); err != nil {
-			return fmt.Errorf("guess_number: clear interrupted quiz: %w", err)
+			return fmt.Errorf("answer_question: clear interrupted quiz: %w", err)
 		}
 		prefix = "上一轮因服务重启中断，积分已清零。\n"
 	}
 	if existing != nil && expired {
 		if err := pass.kv.Delete(ctx.Ctx, quizPluginID, key); err != nil {
-			return fmt.Errorf("guess_number: clear expired quiz: %w", err)
+			return fmt.Errorf("answer_question: clear expired quiz: %w", err)
 		}
 		prefix = "上一轮已超时结束，积分已清零。\n"
 	}
@@ -1072,7 +1072,7 @@ func (pass *quizPass) start(ctx *conduit.MessageContext, rawLanguages string) er
 			pass.reply(ctx, "暂时没有该题型，联系工作室的大佬们添加叭~")
 			return nil
 		}
-		return fmt.Errorf("guess_number: select questions: %w", err)
+		return fmt.Errorf("answer_question: select questions: %w", err)
 	}
 	now := pass.currentTime()
 	game := &quizGame{
@@ -1086,7 +1086,7 @@ func (pass *quizPass) start(ctx *conduit.MessageContext, rawLanguages string) er
 		QuestionDeadline: now.Add(pass.timeout()).UnixNano(),
 	}
 	if err := pass.save(ctx.Ctx, key, game); err != nil {
-		return fmt.Errorf("guess_number: save quiz: %w", err)
+		return fmt.Errorf("answer_question: save quiz: %w", err)
 	}
 
 	stream := make(chan string, quizStreamBuffer)
@@ -1119,7 +1119,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	key := quizKey(ctx.GroupID, ctx.UserID)
 	game, expired, err := pass.load(ctx.Ctx, key)
 	if err != nil {
-		return fmt.Errorf("guess_number: load quiz: %w", err)
+		return fmt.Errorf("answer_question: load quiz: %w", err)
 	}
 	if game == nil {
 		pass.finishRuntimeLocked(key, "")
@@ -1129,7 +1129,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	if expired {
 		question := game.Questions[game.Current]
 		if err := pass.kv.Delete(ctx.Ctx, quizPluginID, key); err != nil {
-			return fmt.Errorf("guess_number: expire quiz: %w", err)
+			return fmt.Errorf("answer_question: expire quiz: %w", err)
 		}
 		pass.finishRuntimeLocked(key, "")
 		pass.reply(ctx, fmt.Sprintf("⏰ 第 %d 题已超时，%s。\n本轮直接结束，积分已清零。", game.Current+1, formatQuizAnswer(question)))
@@ -1138,7 +1138,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	runtime, running := pass.runtimes[key]
 	if !running {
 		if err := pass.kv.Delete(ctx.Ctx, quizPluginID, key); err != nil {
-			return fmt.Errorf("guess_number: clear interrupted quiz: %w", err)
+			return fmt.Errorf("answer_question: clear interrupted quiz: %w", err)
 		}
 		pass.reply(ctx, "本轮因服务重启中断，积分已清零。请用 `/答题` 重新开始。")
 		return nil
@@ -1163,7 +1163,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	question := game.Questions[game.Current]
 	if choice != question.AnswerIndex {
 		if err := pass.save(ctx.Ctx, key, game); err != nil {
-			return fmt.Errorf("guess_number: save wrong answer: %w", err)
+			return fmt.Errorf("answer_question: save wrong answer: %w", err)
 		}
 		remaining := quizAttemptsPerQuestion - game.AnswerAttempts[userID]
 		if remaining > 0 {
@@ -1179,7 +1179,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	game.Current++
 	if game.Current == len(game.Questions) {
 		if err := pass.kv.Delete(ctx.Ctx, quizPluginID, key); err != nil {
-			return fmt.Errorf("guess_number: finish quiz: %w", err)
+			return fmt.Errorf("answer_question: finish quiz: %w", err)
 		}
 		pass.finishRuntimeLocked(key, "")
 		pass.replyUser(ctx, fmt.Sprintf(
@@ -1193,7 +1193,7 @@ func (pass *quizPass) answerForGeneration(ctx *conduit.MessageContext, choice in
 	game.AnswerAttempts = make(map[string]int)
 	game.QuestionDeadline = pass.currentTime().Add(pass.timeout()).UnixNano()
 	if err := pass.save(ctx.Ctx, key, game); err != nil {
-		return fmt.Errorf("guess_number: advance quiz: %w", err)
+		return fmt.Errorf("answer_question: advance quiz: %w", err)
 	}
 	runtime.generation = pass.nextGenerationLocked()
 	pass.armTimeoutLocked(key, game.QuestionDeadline)

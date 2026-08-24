@@ -21,8 +21,9 @@ import (
 
 // TurtleSoupPlugin 实现海龟汤（情境推理）文字游戏：
 //   - /开汤（或 /海龟汤）：蓝妹用 LLM 生成一局谜题（汤面公开、汤底隐藏）
-//   - /问 <问题>：向汤面提问，蓝妹只回答 是/否/无关（可附一句简短提示）
-//   - /猜 <答案>：尝试猜出汤底，命中则揭晓结算
+//   - /问 <问题>：向汤面提问，蓝妹只回答 是/否/无关，不作任何补充
+//   - /猜 <答案>：尝试猜出汤底，命中则揭晓结算；未命中时仅按大方向给出
+//     固定的"方向正确/猜错了"整体判断，不透露汤底任何细节
 //   - /认输（或 /看汤底）：放弃并揭晓汤底
 //
 // 防混乱约束：**同一个群（或同一私聊）同时只能开一局**，未结束前 /开汤 会被拒绝；
@@ -236,14 +237,16 @@ type turtleGeneration struct {
 
 // turtleJudgement LLM 判定结果（提问）
 type turtleJudgement struct {
-	Answer  string `json:"answer"`  // "是" / "否" / "无关"
-	Comment string `json:"comment"` // 简短补充（可选）
+	Answer string `json:"answer"` // "是" / "否" / "无关"
 }
 
 // turtleGuessResult LLM 猜答案判定结果
 type turtleGuessResult struct {
-	Correct bool   `json:"correct"`
-	Comment string `json:"comment"`
+	Correct bool `json:"correct"`
+	// Direction 大方向是否正确（correct=false 时仍可 direction=true）。
+	// 仅用于代码拼接固定的"方向正确"肯定语，LLM 不输出任何文字提示，
+	// 保证不会泄露汤底的具体信息、线索或暗示。
+	Direction bool `json:"direction"`
 }
 
 // intPtr 返回 int 的指针（ChatRequest.MaxTokens 为 *int，nil 表示沿用全局配置）。
@@ -326,8 +329,8 @@ func judgeQuestion(ctx context.Context, client llm.LLMClient, g *turtleGame, que
 - "是"：提问符合汤底描述
 - "否"：提问与汤底矛盾
 - "无关"：提问无法从汤底判断或与游戏无关
-可附一句不超过 15 字的补充提示（comment），不要直接透露汤底。
-仅输出 JSON：{"answer":"是","comment":"..."}`)
+严格只回答 是 / 否 / 无关 三者之一，严禁附加任何解释、提示或多余文字。
+仅输出 JSON：{"answer":"是"}`)
 	resp := &turtleJudgement{}
 	if err := chatJSON(ctx, client, "你是海龟汤主持人，回答必须严格基于汤底事实。", sb.String(), resp, timeout); err != nil {
 		return "", err
@@ -339,18 +342,25 @@ func judgeQuestion(ctx context.Context, client llm.LLMClient, g *turtleGame, que
 	default:
 		resp.Answer = "无关" // LLM 未按格式输出时兜底
 	}
-	return strings.TrimSpace(resp.Answer + " " + resp.Comment), nil
+	return resp.Answer, nil
 }
 
 // judgeGuess 让 LLM 判定玩家的猜测是否命中汤底。timeout 为 LLM 调用独立超时。
-func judgeGuess(ctx context.Context, client llm.LLMClient, g *turtleGame, guess string, timeout time.Duration) (bool, string, error) {
-	system := "你是海龟汤主持人，判断玩家的猜测是否命中了汤底的核心真相（抓住关键事实即可，不必逐字一致）。"
-	user := fmt.Sprintf("汤底：%s\n\n玩家猜测：%s\n\n仅输出 JSON：{\"correct\":true,\"comment\":\"...\"}", g.SoupBase, guess)
+// 返回 (猜对, 大方向正确, 错误)：大方向正确仅在未猜对时用于肯定性提示，
+// 提示语由代码固定拼接，LLM 不产生任何文字内容，杜绝泄露汤底细节。
+func judgeGuess(ctx context.Context, client llm.LLMClient, g *turtleGame, guess string, timeout time.Duration) (bool, bool, error) {
+	system := `你是海龟汤主持人，判断玩家的猜测是否命中汤底。判定标准（从严执行）：
+- 猜对（correct=true）：猜测必须完整覆盖汤底的核心因果链与关键事实（谁做了什么、如何导致汤面现象），允许措辞不同，但不得遗漏关键环节
+- 大方向正确（direction=true）：猜测的总体思路/切入角度与汤底大方向一致（如围绕同一主题、同一类成因），但关键事实或因果仍有缺失或错误。direction 只表达大方向对不对，是整体判断，不针对汤底任何具体元素
+- 大方向错误（direction=false）：猜测的主题、成因类型与汤底南辕北辙，或过于含糊无法判断方向
+注意：direction=true 不等于猜对；宁可整体从严，拿不准时 direction=false。
+严禁输出任何解释、提示或与汤底内容相关的信息，只输出判定结果。`
+	user := fmt.Sprintf("汤底：%s\n\n玩家猜测：%s\n\n仅输出 JSON：{\"correct\":false,\"direction\":false}", g.SoupBase, guess)
 	resp := &turtleGuessResult{}
 	if err := chatJSON(ctx, client, system, user, resp, timeout); err != nil {
-		return false, "", err
+		return false, false, err
 	}
-	return resp.Correct, strings.TrimSpace(resp.Comment), nil
+	return resp.Correct, resp.Direction, nil
 }
 
 // ============================================================
@@ -545,20 +555,25 @@ func (pass *turtleSoupPass) guess(ctx *conduit.MessageContext, guess string) err
 				ch <- "现在没有进行中的汤，用 `/开汤` 开一局吧"
 				return
 			}
-			correct, comment, err := judgeGuess(gctx, pass.llmClient, game, guess, pass.asyncTimeout())
+			correct, direction, err := judgeGuess(gctx, pass.llmClient, game, guess, pass.asyncTimeout())
 			if err != nil {
 				pass.logger.Warn("turtle_soup: 猜答案判定失败", zap.Error(err))
 				ch <- "蓝妹走神了，再猜一次吧 (￣ω￣;)"
 				return
 			}
 			if !correct {
-				ch <- "不是这个答案" + withComment(comment) + "，再想想看~"
+				// 只给大方向的整体肯定，固定文案不含汤底任何细节、线索或暗示。
+				if direction {
+					ch <- "方向正确，但还没完全抓住真相，继续加油~"
+				} else {
+					ch <- "猜错了，再想想看~"
+				}
 				return
 			}
 			pass.mu.Lock()
 			saveGame(pass.kv, gctx, ctx.GroupID, ctx.UserID, nil) // 结算，清除本局
 			pass.mu.Unlock()
-			ch <- fmt.Sprintf("🎉 猜对啦！汤底是：\n%s\n%s", game.SoupBase, withComment(comment))
+			ch <- fmt.Sprintf("🎉 猜对啦！汤底是：\n%s", game.SoupBase)
 		})
 }
 
@@ -581,12 +596,4 @@ func (pass *turtleSoupPass) giveUp(ctx *conduit.MessageContext) error {
 		game.SoupBase, game.Creator))
 	saveGame(pass.kv, ctx.Ctx, ctx.GroupID, ctx.UserID, nil)
 	return nil
-}
-
-// withComment 拼接 LLM 的可选补充说明（为空时返回空串）。
-func withComment(comment string) string {
-	if comment == "" {
-		return ""
-	}
-	return "（" + comment + "）"
 }
