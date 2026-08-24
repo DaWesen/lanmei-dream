@@ -104,8 +104,8 @@ type PluginBuiltinsConfig struct {
 	Sticker bool `mapstructure:"sticker"`
 	// TurtleSoup 海龟汤文字游戏插件
 	TurtleSoup bool `mapstructure:"turtle_soup"`
-	// GuessNumber 编程答题游戏插件
-	GuessNumber bool `mapstructure:"guess_number"`
+	// AnswerQuestion 编程答题游戏插件
+	AnswerQuestion bool `mapstructure:"answer_question"`
 	// DailyQuote 每日一句插件
 	DailyQuote bool `mapstructure:"daily_quote"`
 }

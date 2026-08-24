@@ -176,7 +176,7 @@ func (r *BusinessRegistry) RegisterBuiltins() error {
 	}
 
 	// ── 编程答题游戏插件──
-	if err := register(builtins.GuessNumber, "guess_number", NewGuessNumberPlugin(r.quizDir)); err != nil {
+	if err := register(builtins.AnswerQuestion, "answer_question", NewAnswerQuestionPlugin(r.quizDir)); err != nil {
 		return err
 	}
 

@@ -72,7 +72,7 @@ quizdata/
 
 - 默认展示名 = 目录名首字母大写（`rust` → `Rust`），别名 = 目录名本身。
 - 如需更友好的**展示名 / 别名 / 排序**，在
-  [`internal/bizplugin/guess_number.go`](../internal/bizplugin/guess_number.go) 的
+  [`internal/bizplugin/answer_question.go`](../internal/bizplugin/answer_question.go) 的
   `quizLanguageMetadata` 表中追加一条即可（例如为 `rust` 增加别名 `rs`、调整展示顺序），其余逻辑无需改动。
 
 内置语言的别名与展示名：
