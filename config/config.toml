@@ -20,6 +20,16 @@ min_interval_ms = 1000   # 最小间隔（毫秒）
 max_interval_ms = 5000  # 最大间隔（毫秒），0 表示不限
 jitter_pct = 0.25        # 间隔抖动比例（0.0-1.0），0 表示无抖动
 
+# ============================================
+# 多媒体（RustFS 对象存储 + 视觉理解）
+# 视觉模型复用主 LLM 的 base_url / api_key（OpenAI 兼容多模态端点），
+# 用于：图片消息的 AI 描述（MediaPass）、表情入库自动打标（/添加表情）。
+# 注意：vision_model 留空会回退主对话模型（纯文本模型无法识图），启用视觉必须显式指定。
+# ============================================
+[bot.media]
+vision_enabled = true
+vision_model = "deepseek-v4-flash-vision-exp"
+
 [log]
 level = "info"
 persistent = false

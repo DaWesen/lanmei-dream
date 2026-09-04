@@ -287,6 +287,7 @@ func main() {
 	bizReg.SetNCMURL(cfg.Plugin.NCMURL)
 	bizReg.SetMusicSendMode(cfg.Plugin.MusicSendMode)
 	bizReg.SetObjectStore(inf.ObjectStore)
+	bizReg.SetVisionService(visionSvc)
 	bizReg.SetLLMClient(llmClient)
 	bizReg.SetQuizDir(cfg.Quiz.Dir)
 	// 海龟汤出题/判定 LLM 独立超时（默认 15s）：LLM 慢时快速降级回"汤煮糊了"，不耗尽消息预算
