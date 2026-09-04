@@ -20,9 +20,18 @@ func (db *DB) CreateSticker(ctx context.Context, sticker *model.StickerLibrary) 
 	return db.Orm.WithContext(ctx).Create(sticker).Error
 }
 
-// SearchStickers 按标签模糊检索表情。
-// 使用 pg_trgm ILIKE 模糊匹配（关键词命中任一标签即返回），
-// 命中多条时取最新的 limit 条。
+// stickerSimilarityThreshold 标签相似命中阈值（pg_trgm similarity），
+// 低于该值视为不相关，不进入结果。
+const stickerSimilarityThreshold = 0.15
+
+// SearchStickers 按标签检索表情，供 LLM pick_sticker 工具调用。
+// keyword 是 LLM 生成的情绪短语（如"委屈挽留"），而库内标签多为单词（如"委屈"），
+// 因此命中条件按 OR 组合三种：
+//   - 反向命中（核心）：某标签是情绪短语的子串（"委屈" ⊂ "委屈挽留"）；
+//   - 正向命中：情绪短语是某标签的子串（原 ILIKE 行为）；
+//   - 相似命中：pg_trgm 对展开后的独立标签逐个算 similarity 取最大值，超过阈值。
+//
+// 排序分 score：反向/正向命中强制置顶 1.0，否则取最大相似度；同分按最新优先。
 func (db *DB) SearchStickers(ctx context.Context, keyword string, limit int) ([]model.StickerLibrary, error) {
 	if db.Orm == nil {
 		return nil, errors.New("database: orm is nil")
@@ -36,11 +45,24 @@ func (db *DB) SearchStickers(ctx context.Context, keyword string, limit int) ([]
 
 	var stickers []model.StickerLibrary
 	like := "%" + keyword + "%"
-	err := db.Orm.WithContext(ctx).
-		Where("tags ILIKE ?", like).
-		Order("created_at DESC").
-		Limit(limit).
-		Find(&stickers).Error
+	// score 仅用于排序，Scan 到 []model.StickerLibrary 时多余列会被 GORM 忽略。
+	err := db.Orm.WithContext(ctx).Raw(
+		`SELECT s.*,
+		    CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements_text(s.tags::jsonb) t WHERE ? ILIKE '%'||t||'%')
+		           OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(s.tags::jsonb) t WHERE t ILIKE ?)
+		         THEN 1.0
+		         ELSE (SELECT COALESCE(max(similarity(t, ?)), 0) FROM jsonb_array_elements_text(s.tags::jsonb) t)
+		    END AS score
+		 FROM sticker_library s
+		 WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(s.tags::jsonb) t WHERE ? ILIKE '%'||t||'%')
+		    OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(s.tags::jsonb) t WHERE t ILIKE ?)
+		    OR (SELECT COALESCE(max(similarity(t, ?)), 0) FROM jsonb_array_elements_text(s.tags::jsonb) t) > ?
+		 ORDER BY score DESC, s.created_at DESC
+		 LIMIT ?`,
+		keyword, like, keyword,
+		keyword, like, keyword,
+		stickerSimilarityThreshold, limit,
+	).Scan(&stickers).Error
 	if err != nil {
 		return nil, fmt.Errorf("database: search stickers %q: %w", keyword, err)
 	}
@@ -64,25 +86,6 @@ func (db *DB) ListStickers(ctx context.Context, limit int) ([]model.StickerLibra
 		return nil, fmt.Errorf("database: list stickers: %w", err)
 	}
 	return stickers, nil
-}
-
-// RandomSticker 随机取一张表情（硬性表情规则用）；库为空返回 nil。
-func (db *DB) RandomSticker(ctx context.Context) (*model.StickerLibrary, error) {
-	if db.Orm == nil {
-		return nil, errors.New("database: orm is nil")
-	}
-	var sticker model.StickerLibrary
-	err := db.Orm.WithContext(ctx).
-		Order("random()").
-		Limit(1).
-		First(&sticker).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("database: random sticker: %w", err)
-	}
-	return &sticker, nil
 }
 
 // GetStickerByObjectKey 按对象键查询表情（幂等入库判重用）。

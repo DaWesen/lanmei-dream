@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -186,22 +187,28 @@ func (p *RoleplayStreamPass) runStream(
 		}
 	}
 
-	// 表情提示词计数器：统计 Bot 在本群/私聊中发出的自然语言（LLM 触发）回复数。
-	// 本轮回复实际调用了 pick_sticker（回复携带表情）→ 清零重新计数，否则累加。
-	if p.Chat != nil {
-		scope := replyScopeFor(groupID, senderID)
-		sentSticker := false
-		for _, t := range resp.InvolvedTools {
-			if t == "pick_sticker" {
-				sentSticker = true
-				break
-			}
+	// 表情情绪窗口记账：本轮真实发出表情（pick_sticker 命中且回复含图片 URL）→
+	// 记录情绪标签并清零轮数；纯文字回复 → 轮数 +1。
+	// 检索未命中（回复无图片 URL）按纯文字轮处理，不入窗口。
+	scope := replyScopeFor(groupID, senderID)
+	sentSticker := false
+	for _, t := range resp.InvolvedTools {
+		if t == "pick_sticker" {
+			sentSticker = true
+			break
 		}
-		if sentSticker {
-			p.Chat.ResetReplyCount(scope)
+	}
+	if sentSticker && extractImageURL(resp.Content) != "" {
+		if emotion := parseStickerEmotion(resp.ToolArgs["pick_sticker"]); emotion != "" {
+			p.Chat.RecordMood(scope, emotion)
 		} else {
-			p.Chat.IncReplyCount(scope)
+			// 参数缺失/解析失败：仍按发图清零轮数，情绪记为占位
+			p.Chat.RecordMood(scope, "未记录")
+			p.Logger.Warn("roleplay: pick_sticker 参数解析失败，情绪记为占位",
+				zap.String("user", senderID))
 		}
+	} else {
+		p.Chat.TickMood(scope)
 	}
 
 	// 保存对话记录（L0 原始记录，后续由 Compressor 自动压缩）
@@ -239,13 +246,33 @@ func respContentLen(resp *llm.ChatResponse) int {
 	return utf8.RuneCountInString(resp.Content)
 }
 
-// replyScopeFor 计算表情计数的作用域：群聊用 groupID，私聊用 "dm:"+平台用户ID。
+// replyScopeFor 计算表情情绪窗口的作用域：群聊用 groupID，私聊用 "dm:"+平台用户ID。
 // 与 ai 包内 assembleContext 注入提示词时的作用域保持一致。
 func replyScopeFor(groupID, platformUserID string) string {
 	if groupID != "" {
 		return groupID
 	}
 	return "dm:" + platformUserID
+}
+
+// parseStickerEmotion 从 pick_sticker 的调用参数 JSON 中解析情绪标签。
+// 兼容 "emotion" 与中文键 "情绪" 两种字段名（LLM 可能直接传中文键）；
+// 解析失败返回空串。
+func parseStickerEmotion(argsJSON string) string {
+	if argsJSON == "" {
+		return ""
+	}
+	var args struct {
+		Emotion string `json:"emotion"`
+		QingXu  string `json:"情绪"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	if e := strings.TrimSpace(args.Emotion); e != "" {
+		return e
+	}
+	return strings.TrimSpace(args.QingXu)
 }
 
 // ── RoleplaySegmentPass：流式段落交付 ──

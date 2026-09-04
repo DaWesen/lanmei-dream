@@ -462,7 +462,7 @@ func (pass *stickerDeletePass) reply(ctx *conduit.MessageContext, content string
 // Pass 实现：发表情（发送）
 // ============================================================
 
-// stickerSendPass 发送表情：/发表情 标签 → 检索并发送一张；/发表情（无参）→ 发送一张随机表情（默认行为）。
+// stickerSendPass 发送表情：/发表情 标签 → 检索并发送一张；/发表情（无参）→ 发送最新收藏的一张（默认行为）。
 type stickerSendPass struct {
 	db     *database.DB
 	store  *media.ObjectStore
@@ -473,9 +473,9 @@ func (pass *stickerSendPass) Execute(ctx *conduit.MessageContext) error {
 	keyword := strings.TrimSpace(strings.TrimPrefix(ctx.RawMsg, "/发表情"))
 
 	// 无参数（手动 /发表情 或意图路由触发但未提取到标签）：
-	// 默认发送一张随机表情，不再列出表情库（列表改由仅管理员的 /表情列表 提供）。
+	// 默认发送最新收藏的一张表情，不再列出表情库（列表改由仅管理员的 /表情列表 提供）。
 	if keyword == "" {
-		pass.sendRandom(ctx)
+		pass.sendLatest(ctx)
 		return nil
 	}
 
@@ -522,9 +522,10 @@ func (pass *stickerSendPass) Execute(ctx *conduit.MessageContext) error {
 	return nil
 }
 
-// sendRandom 无参数时的默认行为：从表情库随机取一张发送。
+// sendLatest 无参数时的默认行为：发送表情库最新收藏的一张表情
+// （随机取图接口已随表情检索改造移除，无参路径以取最新一张代替随机）。
 // 库为空、存储未配置或取图失败时给出对应提示。
-func (pass *stickerSendPass) sendRandom(ctx *conduit.MessageContext) {
+func (pass *stickerSendPass) sendLatest(ctx *conduit.MessageContext) {
 	if pass.db == nil || pass.store == nil {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
@@ -532,25 +533,26 @@ func (pass *stickerSendPass) sendRandom(ctx *conduit.MessageContext) {
 		})
 		return
 	}
-	sticker, err := pass.db.RandomSticker(ctx.Ctx)
+	stickers, err := pass.db.ListStickers(ctx.Ctx, 1)
 	if err != nil {
-		pass.logger.Error("sticker: 随机取表情失败", zap.Error(err))
+		pass.logger.Error("sticker: 取表情失败", zap.Error(err))
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情获取失败，请稍后重试",
 		})
 		return
 	}
-	if sticker == nil {
+	if len(stickers) == 0 {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情库还是空的，发张图配上 /添加表情 标签 来收藏吧",
 		})
 		return
 	}
+	sticker := stickers[0]
 	presignedURL, err := pass.store.Presign(ctx.Ctx, sticker.ObjectKey, 10*time.Minute)
 	if err != nil {
-		pass.logger.Error("sticker: 随机表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
+		pass.logger.Error("sticker: 表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情发送失败，请稍后重试",
@@ -664,28 +666,6 @@ func (p *StickerPlugin) toolPickSticker(ctx context.Context, argsJSON string) (s
 	}
 	// 返回 URL 供 LLM 直接作为图片输出
 	return presignedURL, nil
-}
-
-// Pick 随机取一张表情并返回可发送的预签名 URL（硬性表情规则：Bot 周期性附带表情）。
-// 库为空、对象存储未配置或取图失败时返回空串，表示本轮不注入表情。
-func (p *StickerPlugin) Pick(ctx context.Context) string {
-	if p.db == nil || p.store == nil {
-		return ""
-	}
-	sticker, err := p.db.RandomSticker(ctx)
-	if err != nil {
-		p.logger.Warn("sticker: 随机取表情失败", zap.Error(err))
-		return ""
-	}
-	if sticker == nil {
-		return ""
-	}
-	url, err := p.store.Presign(ctx, sticker.ObjectKey, 10*time.Minute)
-	if err != nil {
-		p.logger.Warn("sticker: 随机表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
-		return ""
-	}
-	return url
 }
 
 // ============================================================
