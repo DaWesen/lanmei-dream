@@ -51,15 +51,18 @@ func memoryGroupScope(groupID string, userID int64) (scope string, args []any) {
 
 // Retrieve 根据查询向量检索最相关的 N 条记忆（向量召回）
 func (s *PGVectorStore) Retrieve(ctx context.Context, queryVec []float32, userID int64, groupID string, limit int) ([]*memory.Memory, error) {
+	// 向量以参数形式传入并显式 ::vector 转换：参数化后以 text 到达，
+	// <=> 操作符无法从 $n 推断 vector 类型，缺 cast 会报
+	// operator does not exist: vector <=> text。
+	// （kb/provider/local 的向量召回是同模式的既有正确实现。）
 	vecStr := formatVector(queryVec)
 	scope, args := memoryGroupScope(groupID, userID)
 
 	var rows []model.MemoryVector
-	err := s.orm.WithContext(ctx).
-		Where(scope, args...).
-		Order(fmt.Sprintf("embedding <=> %s", vecStr)).
-		Limit(limit).
-		Find(&rows).Error
+	err := s.orm.WithContext(ctx).Raw(
+		`SELECT * FROM memory_vectors WHERE `+scope+` ORDER BY embedding <=> ?::vector LIMIT ?`,
+		append(args, vecStr, limit)...,
+	).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("pgvector retrieve: %w", err)
 	}

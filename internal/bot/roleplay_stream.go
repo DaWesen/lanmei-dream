@@ -156,14 +156,17 @@ func (p *RoleplayStreamPass) runStream(
 	// 注意：assembleContext 会原地修改 req.Messages，重试必须用新请求。
 	if strings.TrimSpace(resp.Content) == "" {
 		p.Logger.Warn("roleplay: LLM 返回空响应，重试一次", zap.String("user", senderID))
+		// 空响应多为推理模型思考耗尽输出预算，重试时关闭思考（与 stream 层超限重试同思路）
+		retryDisableThinking := true
 		retryReq := &llm.ChatRequest{
-			Messages:       []llm.Message{{Role: llm.RoleUser, Content: userMsg}},
-			UserID:         userID,
-			UserName:       nickname,
-			GroupName:      groupID,
-			GroupID:        groupID,
-			PlatformUserID: senderID,
-			TopicContext:   topicCtx,
+			Messages:         []llm.Message{{Role: llm.RoleUser, Content: userMsg}},
+			UserID:           userID,
+			UserName:         nickname,
+			GroupName:        groupID,
+			GroupID:          groupID,
+			PlatformUserID:   senderID,
+			TopicContext:     topicCtx,
+			DisableThinking:  &retryDisableThinking,
 		}
 		retryCtx, retryCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		retryResp, retryErr := p.Chat.ChatStream(retryCtx, retryReq, segCh)
