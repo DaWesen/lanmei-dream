@@ -14,6 +14,11 @@ import (
 	"github.com/DaWesen/lanmei-dream/internal/ai/llm"
 )
 
+// maxReasoningChars 流式生成中推理思考的长度上限（字符）。
+// 正文为空而思考超过该值 → 判定模型陷入"只思考不输出"，中止并关思考重试。
+// 事故记录：2026-09-04 群聊事故中模型思考 17528 字符仍无正文，被兜底逻辑整段发出。
+const maxReasoningChars = 500
+
 // ChatStream 以流式方式执行对话，将段落增量写入 segmentCh。
 //
 // 流程：
@@ -77,9 +82,18 @@ func (s *ChatService) chatStreamWithToolLoop(
 	totalOutput := 0
 	var invokedTools []string
 	var lastToolResult string // 最近一次工具结果（LLM 工具轮后无文本时兜底输出）
+	// disableThinking 本轮流式生成是否关闭推理思考。
+	// 推理模型可能把输出预算全部花在 reasoning 上导致正文为空，
+	// 触发思考超限后置位，下一轮以 thinking=disabled 重试。
+	disableThinking := false
 
+roundLoop:
 	for round := 0; round < maxToolCallRounds; round++ {
-		reader, streamErr := chatModel.Stream(ctx, schemaMsgs)
+		var streamOpts []model.Option
+		if disableThinking {
+			streamOpts = append(streamOpts, llm.DisableThinkingOption())
+		}
+		reader, streamErr := chatModel.Stream(ctx, schemaMsgs, streamOpts...)
 		if streamErr != nil {
 			return nil, fmt.Errorf("chat stream: open stream: %w", streamErr)
 		}
@@ -200,6 +214,18 @@ func (s *ChatService) chatStreamWithToolLoop(
 			}
 			if chunk.ReasoningContent != "" {
 				reasoningBuf.WriteString(chunk.ReasoningContent)
+				// 思考超限实时防护：思考远超阈值且正文仍为空，说明模型把输出预算
+				// 全部耗在 reasoning 上（会话表现为"只思考不输出"），继续等待只会
+				// 拖垮超时预算。立即中止本轮流，下一轮关闭思考重试。
+				// 仅未关思考的首轮生效（重试轮不再中止，避免循环）。
+				if reasoningBuf.Len() > maxReasoningChars && segmenter.FullText() == "" && !disableThinking {
+					reader.Close()
+					s.logger.Warn("chat stream: 思考超限，中止本轮并关思考重试",
+						zap.Int("reasoning_len", reasoningBuf.Len()),
+						zap.Int("round", round))
+					disableThinking = true
+					continue roundLoop
+				}
 			}
 			if len(chunk.ToolCalls) > 0 {
 				chunks := []*schema.Message{firstChunk, chunk}
@@ -262,20 +288,10 @@ func (s *ChatService) chatStreamWithToolLoop(
 					return nil, sendErr
 				}
 			}
-		} else if segmenter.FullText() == "" && reasoningBuf.Len() > 0 {
-			// 仅返回 reasoning 而无 content 的空响应：输出思考内容兜底，避免用户看到"没听清"。
-			s.logger.Info("chat stream: 使用 reasoning 兜底输出", zap.Int("reasoning_len", reasoningBuf.Len()))
-			for _, seg := range segmenter.Feed(strings.TrimSpace(reasoningBuf.String())) {
-				if sendErr := sendSegment(ctx, segmentCh, seg); sendErr != nil {
-					return nil, sendErr
-				}
-			}
-			if last := segmenter.Flush(); last != "" {
-				if sendErr := sendSegment(ctx, segmentCh, last); sendErr != nil {
-					return nil, sendErr
-				}
-			}
 		}
+		// 注意：reasoning（思考内容）绝不能作为回复输出给用户——
+		// 它包含提示词线索、检索内容与模型内部推理，泄露即事故。
+		// 空响应统一由上层（roleplay）以关思考重试 / 提示语兜底。
 
 		// 异步存记忆 + 触发压缩
 		s.asyncStoreAndCompress(ctx, req.UserID, req.GroupID, lastMsgContent, queryVec)

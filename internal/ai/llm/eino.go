@@ -9,6 +9,15 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// DisableThinkingOption 返回关闭推理模型思考的 eino Option。
+// 非流式 Chat 与流式直连路径（chatModel.Stream）共用，
+// 经 OpenAI 兼容层扩展字段 thinking={"type":"disabled"} 透传（DeepSeek 等支持）。
+func DisableThinkingOption() model.Option {
+	return openai.WithExtraFields(map[string]any{
+		"thinking": map[string]any{"type": "disabled"},
+	})
+}
+
 // EinoOptions eino ChatModel 创建参数（provider 无关）
 type EinoOptions struct {
 	Provider    string  // Provider 名称（如 deepseek/qwen/openai），用于计费统计
@@ -117,9 +126,7 @@ func (c *EinoClient) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse,
 	if req.DisableThinking != nil && *req.DisableThinking {
 		// DeepSeek 等推理模型通过 thinking={"type":"disabled"} 关闭思考，
 		// 经 eino 的 ExtraFields 透传（OpenAI 兼容扩展字段）
-		opts = append(opts, openai.WithExtraFields(map[string]any{
-			"thinking": map[string]any{"type": "disabled"},
-		}))
+		opts = append(opts, DisableThinkingOption())
 	}
 
 	resp, err := c.model.Generate(ctx, msgs, opts...)
