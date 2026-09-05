@@ -287,6 +287,7 @@ func main() {
 	bizReg.SetNCMURL(cfg.Plugin.NCMURL)
 	bizReg.SetMusicSendMode(cfg.Plugin.MusicSendMode)
 	bizReg.SetObjectStore(inf.ObjectStore)
+	bizReg.SetVisionService(visionSvc)
 	bizReg.SetLLMClient(llmClient)
 	bizReg.SetQuizDir(cfg.Quiz.Dir)
 	// 海龟汤出题/判定 LLM 独立超时（默认 15s）：LLM 慢时快速降级回"汤煮糊了"，不耗尽消息预算
@@ -295,19 +296,10 @@ func main() {
 		logger.Fatal("内置业务插件注册失败", zap.Error(err))
 	}
 
-	// 硬性表情规则：把表情库插件的随机表情能力注入 Bot（未启用/未注册时自动跳过）。
-	// 使 bot 每回复 10~20 条消息会周期性附带一张表情，不依赖 LLM 主动调用。
-	// 同时装配表情提示词计数器：统计 Bot 在本群/私聊的自然语言回复数，
-	// 以"当前计数{count}"注入 System Prompt，引导 LLM 约每五到十句发一次表情。
-	if p, ok := pluginReg.Get("sticker"); ok {
-		if inj, ok := p.(bot.StickerEmotionInjector); ok {
-			b.SetStickerInjector(inj)
-			counter := ai.NewReplyCounter()
-			if chatSvc != nil {
-				chatSvc.SetReplyCounter(counter)
-			}
-			b.SetStickerCounter(counter)
-		}
+	// 表情情绪窗口（按群/私聊统计表情发送历史，注入提示词控制发表情节奏）
+	if chatSvc != nil {
+		moodWindow := ai.NewMoodWindow()
+		chatSvc.SetMoodWindow(moodWindow)
 	}
 
 	if err := pluginReg.InitPlugins(ctx); err != nil {

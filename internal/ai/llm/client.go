@@ -78,6 +78,9 @@ type ChatResponse struct {
 	OutputTokens  int                `json:"output_tokens"`            // 输出 token（计费用）
 	ToolCalls     []*schema.ToolCall `json:"tool_calls,omitempty"`     // LLM 返回的工具调用
 	InvolvedTools []string           `json:"involved_tools,omitempty"` // 本次对话中实际调用的工具名列表
+	// ToolArgs 本次对话中实际执行的工具调用参数（工具名 → 参数 JSON 字符串）。
+	// 同一工具多次调用时保留最后一次；供上层（如表情情绪窗口）读取调用参数。
+	ToolArgs map[string]string `json:"tool_args,omitempty"`
 }
 
 // UsageRecord LLM 用量记录（由各采集点上报给计费模块）。

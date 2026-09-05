@@ -82,6 +82,8 @@ func (s *ChatService) chatStreamWithToolLoop(
 	totalOutput := 0
 	var invokedTools []string
 	var lastToolResult string // 最近一次工具结果（LLM 工具轮后无文本时兜底输出）
+	// toolArgs 实际执行的工具调用参数（工具名 → 参数 JSON），同名覆盖保留最后一次
+	toolArgs := make(map[string]string)
 	// disableThinking 本轮流式生成是否关闭推理思考。
 	// 推理模型可能把输出预算全部花在 reasoning 上导致正文为空，
 	// 触发思考超限后置位，下一轮以 thinking=disabled 重试。
@@ -140,6 +142,8 @@ roundLoop:
 			for _, tc := range accumulated.ToolCalls {
 				s.logger.Info("chat stream: 工具轮触发",
 					zap.String("tool", tc.Function.Name), zap.String("args", tc.Function.Arguments))
+				// 记录工具调用参数（同名覆盖，保留最后一次），供上层读取
+				toolArgs[tc.Function.Name] = tc.Function.Arguments
 				result, callErr := s.toolReg.Call(ctx, tc.Function.Name, tc.Function.Arguments)
 				if callErr != nil {
 					result = fmt.Sprintf("工具调用失败: %v", callErr)
@@ -305,6 +309,7 @@ roundLoop:
 			InputTokens:   totalInput,
 			OutputTokens:  totalOutput,
 			InvolvedTools: invokedTools,
+			ToolArgs:      toolArgs,
 		}, nil
 	}
 
@@ -329,6 +334,7 @@ roundLoop:
 		InputTokens:   totalInput,
 		OutputTokens:  totalOutput,
 		InvolvedTools: invokedTools,
+		ToolArgs:      toolArgs,
 	}, nil
 }
 

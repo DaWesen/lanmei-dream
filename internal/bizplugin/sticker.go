@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DaWesen/lanmei-dream/internal/ai"
 	"github.com/DaWesen/lanmei-dream/internal/database"
 	"github.com/DaWesen/lanmei-dream/internal/media"
 	"github.com/DaWesen/lanmei-dream/internal/model"
@@ -23,7 +24,7 @@ import (
 // ============================================================
 
 // StickerPlugin 实现自定义表情的收藏与发送：
-//   - /添加表情 <标签>（兼容旧命令 /收表情）：管理员（普通管理员 + 超管）收藏消息中的图片（上传 RustFS + 写 sticker_library）
+//   - /添加表情（兼容旧命令 /收表情）：管理员（普通管理员 + 超管）收藏消息中的图片（上传 RustFS + 视觉模型自动打标 + 写 sticker_library）
 //   - /删除表情 <标签>：管理员按精确标签删除表情及未被共享引用的 RustFS 对象
 //   - /发表情 <标签>：按标签发送一张表情；无参数时发送一张随机表情（默认行为）
 //   - /表情列表：仅管理员（普通管理员 + 超管）可查看表情库清单（必须是 /表情列表 完整命令）
@@ -51,13 +52,14 @@ import (
 type StickerPlugin struct {
 	db     *database.DB
 	store  *media.ObjectStore
+	vision *ai.VisionService // 视觉模型（自动打标）；nil 时收藏表情不可用
 	logger *zap.Logger
 }
 
-// NewStickerPlugin 创建表情库插件。store 为 nil 时收藏、删除和发送功能不可用（仍可查询库内记录）。
-// db 与 logger 在 OnInit 阶段从 PluginContext 注入。
-func NewStickerPlugin(store *media.ObjectStore, logger *zap.Logger) *StickerPlugin {
-	return &StickerPlugin{store: store, logger: logger}
+// NewStickerPlugin 创建表情库插件。store 为 nil 时收藏、删除和发送功能不可用（仍可查询库内记录）；
+// vision 为 nil 时收藏表情的自动打标不可用。db 与 logger 在 OnInit 阶段从 PluginContext 注入。
+func NewStickerPlugin(store *media.ObjectStore, vision *ai.VisionService, logger *zap.Logger) *StickerPlugin {
+	return &StickerPlugin{store: store, vision: vision, logger: logger}
 }
 
 // Info 返回表情库插件元信息。
@@ -68,7 +70,7 @@ func (p *StickerPlugin) Info() pluginpkg.PluginInfo {
 		Description: "自定义表情收藏、按标签管理与按语义发送",
 		Version:     "1.1.0",
 		Commands: []pluginpkg.CommandDef{
-			{Name: "添加表情", Description: "收藏消息中的图片为表情（仅管理员），格式：/添加表情 标签1 标签2", Order: 170},
+			{Name: "添加表情", Description: "收藏消息中的图片为表情（仅管理员），附带一张图片即可，标签由视觉模型自动生成", Order: 170},
 			{Name: "删除表情", Description: "按精确标签删除表情（仅管理员且只接受显式斜杠命令），格式：/删除表情 标签", Order: 180},
 			{Name: "发表情", Description: "发送匹配标签的表情；无参数时发送随机表情，格式：/发表情 标签", Order: 80},
 			{Name: "表情列表", Description: "查看表情库清单（仅管理员），格式：/表情列表", Order: 90},
@@ -98,7 +100,7 @@ func (p *StickerPlugin) OnInit(ctx *pluginpkg.PluginContext) error {
 
 	// 注册 Pass
 	collectPassID := pluginpkg.PassID("sticker", "collect")
-	collectPass := &stickerCollectPass{db: p.db, store: p.store, logger: p.logger}
+	collectPass := &stickerCollectPass{db: p.db, store: p.store, vision: p.vision, logger: p.logger}
 	if err := ctx.Engine.RegisterPass(collectPassID, collectPass); err != nil {
 		return fmt.Errorf("register sticker collect pass: %w", err)
 	}
@@ -200,17 +202,6 @@ func hasStickerCollectPrefix(msg string) bool {
 	return false
 }
 
-// stripStickerCollectPrefix 去掉添加表情命令前缀，返回剩余参数部分。
-func stripStickerCollectPrefix(msg string) string {
-	msg = strings.TrimSpace(msg)
-	for _, p := range stickerCollectPrefixes {
-		if strings.HasPrefix(msg, p) {
-			return strings.TrimSpace(strings.TrimPrefix(msg, p))
-		}
-	}
-	return msg
-}
-
 // isCollectStickerCommand 判断消息是否为添加表情命令（兼容旧命令 /收表情）。
 func isCollectStickerCommand(ctx *conduit.MessageContext) bool {
 	return hasStickerCollectPrefix(ctx.RawMsg)
@@ -255,10 +246,11 @@ func isCommandReentry(ctx *conduit.MessageContext) bool {
 // Pass 实现：添加表情入库
 // ============================================================
 
-// stickerCollectPass 收藏表情：校验超管 → 提取图片 → 上传 RustFS → 写库。
+// stickerCollectPass 收藏表情：校验超管 → 提取图片 → 上传 RustFS → 视觉模型自动打标 → 写库。
 type stickerCollectPass struct {
 	db     *database.DB
 	store  *media.ObjectStore
+	vision *ai.VisionService
 	logger *zap.Logger
 }
 
@@ -278,17 +270,6 @@ func (pass *stickerCollectPass) Execute(ctx *conduit.MessageContext) error {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情存储未配置（RustFS 不可用），无法收藏",
-		})
-		return nil
-	}
-
-	// 解析标签：/添加表情 标签1 标签2
-	raw := stripStickerCollectPrefix(ctx.RawMsg)
-	tags := strings.Fields(raw)
-	if len(tags) == 0 {
-		conduit.AppendOutput(ctx, &conduit.Message{
-			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
-			Content: "格式错误！用法：/添加表情 标签1 标签2（需附带一张图片）",
 		})
 		return nil
 	}
@@ -343,6 +324,24 @@ func (pass *stickerCollectPass) Execute(ctx *conduit.MessageContext) error {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: fmt.Sprintf("这张表情已在表情库啦（ID %d），无需重复收藏", existing.ID),
+		})
+		return nil
+	}
+
+	// 视觉模型自动打标（替代人工标签参数，语义检索的标签质量由模型保证）
+	if pass.vision == nil {
+		conduit.AppendOutput(ctx, &conduit.Message{
+			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
+			Content: "视觉模型未配置（bot.media.vision_enabled），无法自动打标，请联系管理员开启",
+		})
+		return nil
+	}
+	tags, err := pass.vision.GenerateTags(ctx.Ctx, data, mime)
+	if err != nil || len(tags) == 0 {
+		pass.logger.Warn("sticker: 视觉自动打标失败", zap.String("object_key", objectKey), zap.Error(err))
+		conduit.AppendOutput(ctx, &conduit.Message{
+			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
+			Content: "标签生成失败，请稍后再试",
 		})
 		return nil
 	}
@@ -462,7 +461,7 @@ func (pass *stickerDeletePass) reply(ctx *conduit.MessageContext, content string
 // Pass 实现：发表情（发送）
 // ============================================================
 
-// stickerSendPass 发送表情：/发表情 标签 → 检索并发送一张；/发表情（无参）→ 发送一张随机表情（默认行为）。
+// stickerSendPass 发送表情：/发表情 标签 → 检索并发送一张；/发表情（无参）→ 发送最新收藏的一张（默认行为）。
 type stickerSendPass struct {
 	db     *database.DB
 	store  *media.ObjectStore
@@ -473,9 +472,9 @@ func (pass *stickerSendPass) Execute(ctx *conduit.MessageContext) error {
 	keyword := strings.TrimSpace(strings.TrimPrefix(ctx.RawMsg, "/发表情"))
 
 	// 无参数（手动 /发表情 或意图路由触发但未提取到标签）：
-	// 默认发送一张随机表情，不再列出表情库（列表改由仅管理员的 /表情列表 提供）。
+	// 默认发送最新收藏的一张表情，不再列出表情库（列表改由仅管理员的 /表情列表 提供）。
 	if keyword == "" {
-		pass.sendRandom(ctx)
+		pass.sendLatest(ctx)
 		return nil
 	}
 
@@ -522,9 +521,10 @@ func (pass *stickerSendPass) Execute(ctx *conduit.MessageContext) error {
 	return nil
 }
 
-// sendRandom 无参数时的默认行为：从表情库随机取一张发送。
+// sendLatest 无参数时的默认行为：发送表情库最新收藏的一张表情
+// （随机取图接口已随表情检索改造移除，无参路径以取最新一张代替随机）。
 // 库为空、存储未配置或取图失败时给出对应提示。
-func (pass *stickerSendPass) sendRandom(ctx *conduit.MessageContext) {
+func (pass *stickerSendPass) sendLatest(ctx *conduit.MessageContext) {
 	if pass.db == nil || pass.store == nil {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
@@ -532,25 +532,26 @@ func (pass *stickerSendPass) sendRandom(ctx *conduit.MessageContext) {
 		})
 		return
 	}
-	sticker, err := pass.db.RandomSticker(ctx.Ctx)
+	stickers, err := pass.db.ListStickers(ctx.Ctx, 1)
 	if err != nil {
-		pass.logger.Error("sticker: 随机取表情失败", zap.Error(err))
+		pass.logger.Error("sticker: 取表情失败", zap.Error(err))
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情获取失败，请稍后重试",
 		})
 		return
 	}
-	if sticker == nil {
+	if len(stickers) == 0 {
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情库还是空的，发张图配上 /添加表情 标签 来收藏吧",
 		})
 		return
 	}
+	sticker := stickers[0]
 	presignedURL, err := pass.store.Presign(ctx.Ctx, sticker.ObjectKey, 10*time.Minute)
 	if err != nil {
-		pass.logger.Error("sticker: 随机表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
+		pass.logger.Error("sticker: 表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
 		conduit.AppendOutput(ctx, &conduit.Message{
 			UserID: ctx.UserID, GroupID: ctx.GroupID, IsGroup: ctx.IsGroup,
 			Content: "表情发送失败，请稍后重试",
@@ -664,28 +665,6 @@ func (p *StickerPlugin) toolPickSticker(ctx context.Context, argsJSON string) (s
 	}
 	// 返回 URL 供 LLM 直接作为图片输出
 	return presignedURL, nil
-}
-
-// Pick 随机取一张表情并返回可发送的预签名 URL（硬性表情规则：Bot 周期性附带表情）。
-// 库为空、对象存储未配置或取图失败时返回空串，表示本轮不注入表情。
-func (p *StickerPlugin) Pick(ctx context.Context) string {
-	if p.db == nil || p.store == nil {
-		return ""
-	}
-	sticker, err := p.db.RandomSticker(ctx)
-	if err != nil {
-		p.logger.Warn("sticker: 随机取表情失败", zap.Error(err))
-		return ""
-	}
-	if sticker == nil {
-		return ""
-	}
-	url, err := p.store.Presign(ctx, sticker.ObjectKey, 10*time.Minute)
-	if err != nil {
-		p.logger.Warn("sticker: 随机表情 URL 生成失败", zap.Uint("id", sticker.ID), zap.Error(err))
-		return ""
-	}
-	return url
 }
 
 // ============================================================

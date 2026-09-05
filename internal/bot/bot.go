@@ -31,28 +31,24 @@ import (
 
 // Bot 封装 Conduit 引擎 + 网关服务 + 意图分析器引用（用于动态更新命令/工具列表）
 type Bot struct {
-	engine          *conduit.Engine
-	plugins         *pluginpkg.Registry
-	gw              *gateway.Server
-	analyzer        *intent.Analyzer               // 意图分析器引用，供插件加载后刷新命令/工具列表
-	cmdSys          *command.System                // 命令系统引用
-	toolReg         *tool.Registry                 // 工具注册表引用
-	dedup           *Deduper                       // 消息去重（message_id SETNX）
-	typingSpeedMS   int                            // 打字速度（毫秒/字），0 禁用间隔
-	minIntervalMS   int                            // 最小发送间隔（毫秒）
-	maxIntervalMS   int                            // 最大发送间隔（毫秒），0 不限
-	jitterPct       float64                        // 间隔抖动比例（0.0-1.0）
-	superUsers      map[string]map[string]struct{} // 超管集合：平台 → 用户ID（静态配置 + 动态添加合并）
-	adminMu         sync.RWMutex                   // 保护 superUsers 的并发读写
-	sessionMu       sync.Mutex                     // 保护 sessions 的并发读写
-	sessions        map[string]*sessionInfo        // 会话最近消息（供"回复前已有新消息→引用+at"判定）
-	db              *database.DB                   // 数据库访问（动态管理员持久化；nil 时动态添加不可用）
-	stickerInjector StickerEmotionInjector         // 硬性表情规则注入器（表情库插件，nil 表示未启用）
-	stickerCount    int                            // 已回复消息计数（硬性表情规则）
-	stickerTarget   int                            // 触发阈值（10~20 随机，0 表示首次回复前未初始化）
-	stickerCounter  *ai.ReplyCounter               // 表情提示词计数器（与 ChatService 共享；nil 表示未启用）
-	objectStore     *media.ObjectStore             // RustFS 对象存储（nil 时内网图片转 base64 发送不可用）
-	logger          *zap.Logger
+	engine        *conduit.Engine
+	plugins       *pluginpkg.Registry
+	gw            *gateway.Server
+	analyzer      *intent.Analyzer               // 意图分析器引用，供插件加载后刷新命令/工具列表
+	cmdSys        *command.System                // 命令系统引用
+	toolReg       *tool.Registry                 // 工具注册表引用
+	dedup         *Deduper                       // 消息去重（message_id SETNX）
+	typingSpeedMS int                            // 打字速度（毫秒/字），0 禁用间隔
+	minIntervalMS int                            // 最小发送间隔（毫秒）
+	maxIntervalMS int                            // 最大发送间隔（毫秒），0 不限
+	jitterPct     float64                        // 间隔抖动比例（0.0-1.0）
+	superUsers    map[string]map[string]struct{} // 超管集合：平台 → 用户ID（静态配置 + 动态添加合并）
+	adminMu       sync.RWMutex                   // 保护 superUsers 的并发读写
+	sessionMu     sync.Mutex                     // 保护 sessions 的并发读写
+	sessions      map[string]*sessionInfo        // 会话最近消息（供"回复前已有新消息→引用+at"判定）
+	db            *database.DB                   // 数据库访问（动态管理员持久化；nil 时动态添加不可用）
+	objectStore   *media.ObjectStore             // RustFS 对象存储（nil 时内网图片转 base64 发送不可用）
+	logger        *zap.Logger
 
 	// ── 管理面板控制平面 ──
 	btMu           sync.RWMutex                     // 保护 btRoot 引用
@@ -168,60 +164,6 @@ func (b *Bot) emitTrace(ctx *conduit.MessageContext, err error, msg *gateway.Nor
 		GroupID:   msg.GroupID,
 		Platform:  string(msg.Platform),
 	})
-}
-
-// StickerEmotionInjector 硬性表情规则注入器：Bot 周期性回复中附带一张表情。
-// 由表情库插件实现（StickerPlugin.Pick，结构满足即可，插件无需依赖本包），
-// nil 表示未启用。保证在 LLM 主动调用 pick_sticker 之外，bot 也会"带表情说话"。
-type StickerEmotionInjector interface {
-	// Pick 返回一张随机表情的可发送 URL；无可用表情时返回空串。
-	Pick(ctx context.Context) string
-}
-
-// SetStickerInjector 注入硬性表情规则实现（表情库插件注册完成后由 main 调用）。
-func (b *Bot) SetStickerInjector(inj StickerEmotionInjector) {
-	b.stickerInjector = inj
-	b.stickerCount = 0
-	b.stickerTarget = 0
-}
-
-// SetStickerCounter 注入表情提示词计数器（与 ChatService 共享同一实例，表情库插件注册完成后由 main 调用）。
-func (b *Bot) SetStickerCounter(c *ai.ReplyCounter) {
-	b.stickerCounter = c
-}
-
-// maybeInjectSticker 硬性表情规则：每回复 10~20 条消息后，附带一张随机表情。
-// 只在普通消息回复时计数（事件/通知不计）；触发后阈值在 10~20 间重新随机。
-// turnSentSticker 为本轮是否已发出图片（LLM 输出 URL / 插件段 / 命令发图）：
-// 已带图则本轮不再补发（视为本轮已"携带表情"，直接重置计数），
-// 避免"LLM 已发表情 + 硬性规则又命中"造成连续两条表情。
-func (b *Bot) maybeInjectSticker(msg *gateway.NormalizedMessage, turnSentSticker bool) {
-	if b.stickerInjector == nil {
-		return
-	}
-	if msg == nil || msg.MessageType != gateway.MessageTypeMessage {
-		return
-	}
-	if b.stickerTarget == 0 {
-		b.stickerTarget = 10 + rand.IntN(11) // 首次回复时初始化 10~20
-	}
-	b.stickerCount++
-	if b.stickerCount < b.stickerTarget {
-		return
-	}
-	b.stickerCount = 0
-	b.stickerTarget = 10 + rand.IntN(11)
-	if turnSentSticker {
-		return
-	}
-	// 纯 URL 输出 → reply 识别为图片段发送（与 LLM 输出 URL 同一路径）
-	if url := b.stickerInjector.Pick(context.Background()); url != "" {
-		b.reply(msg, url)
-		// 同步清零表情提示词计数：硬性规则已补发一张表情，提示词"距上次发表情的对话间隔"归零
-		if b.stickerCounter != nil {
-			b.stickerCounter.Reset(replyScopeFor(msg.GroupID, msg.UserID))
-		}
-	}
 }
 
 // RefreshIntentAnalyzer 在插件注册新的命令或工具后同步更新意图分析器。
@@ -758,9 +700,7 @@ func (b *Bot) makeResponseCallback(msg *gateway.NormalizedMessage) func(*conduit
 // 纯文本回复在群聊中若为明确指向性回复（命令/工具/at/话题提及），
 // 会自动 at 请求者，防止"这回复给谁的"歧义（签到等插件回复即受益于此）。
 func (b *Bot) flushOutput(ctx *conduit.MessageContext, msg *gateway.NormalizedMessage) {
-	sentSticker := segmentsContainImage(ctx)
 	if b.trySendSegments(ctx, msg) {
-		b.maybeInjectSticker(msg, sentSticker)
 		return
 	}
 	suppressRequesterAt, _ := conduit.Get[bool](ctx, KeySuppressRequesterAt)
@@ -771,29 +711,12 @@ func (b *Bot) flushOutput(ctx *conduit.MessageContext, msg *gateway.NormalizedMe
 	anchorDone := false
 	for _, out := range ctx.Output {
 		if extractImageURL(out.Content) != "" {
-			sentSticker = true
 			b.sendReply(msg, out.Content, replyOpts{})
 			continue
 		}
 		b.sendReply(msg, out.Content, replyOpts{quoteIfStale: !anchorDone, atRequester: !anchorDone && directed})
 		anchorDone = true
 	}
-	b.maybeInjectSticker(msg, sentSticker)
-}
-
-// segmentsContainImage 判断出站段列表（KeySendSegments）是否已含 image 段，
-// 供硬性表情规则判断"本轮是否已带图"，避免与 LLM/插件发的表情重复。
-func segmentsContainImage(ctx *conduit.MessageContext) bool {
-	raw, ok := conduit.Get[[]map[string]any](ctx, KeySendSegments)
-	if !ok {
-		return false
-	}
-	for _, seg := range raw {
-		if t, _ := seg["type"].(string); t == "image" {
-			return true
-		}
-	}
-	return false
 }
 
 // trySendSegments 尝试按插件写入的出站段列表发送。
@@ -847,7 +770,6 @@ func (b *Bot) streamSegments(ctx *conduit.MessageContext, msg *gateway.Normalize
 	}
 
 	first := true
-	sentSticker := false
 	// 明确指向性回复（at/话题提及/命令等）在群聊中首段 at 请求者（任务4）；
 	// 计算一次复用，后续段落不再 at。
 	directed := b.isDirected(ctx, msg)
@@ -855,10 +777,6 @@ func (b *Bot) streamSegments(ctx *conduit.MessageContext, msg *gateway.Normalize
 	// 首段发送后初始化，后续段落按 "lastSentAt + 打字间隔" 计算最早可发送时间。
 	var lastSentAt time.Time
 	for segment := range segCh {
-		// 本轮已输出图片 URL（LLM 调 pick_sticker 等）则标记，收尾不再补发随机表情
-		if extractImageURL(segment) != "" {
-			sentSticker = true
-		}
 		// 首段无延迟（LLM 生成期间已"打字"完毕）；后续段落等待「距上次发送」的
 		// 打字间隔：若 LLM 生成耗时已超过打字间隔则直接发送，仅剩余时间为正才 Sleep。
 		if !first && !lastSentAt.IsZero() {
@@ -907,9 +825,6 @@ func (b *Bot) streamSegments(ctx *conduit.MessageContext, msg *gateway.Normalize
 		// 上一段已发送完成，以此刻作为"距上次发送"的计时基准
 		lastSentAt = time.Now()
 	}
-
-	// 流式回复发送完毕后，按硬性表情规则决定是否补发一张表情
-	b.maybeInjectSticker(msg, sentSticker)
 }
 
 // calcSegmentInterval 根据段落文本长度计算发送间隔。

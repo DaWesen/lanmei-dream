@@ -48,7 +48,7 @@ type ChatService struct {
 	promptMgr  *prompt.Manager // Prompt 管理器（可选，为 nil 时使用 DefaultSystemPrompt）
 	knowledge  *kbpkg.Service  // 知识库系统（可选，为 nil 时跳过隐式召回）
 	usageHook  llm.UsageHook   // 用量上报回调（工具循环/流式路径专用；直连路径由 EinoClient 内部上报）
-	replyCount *ReplyCounter   // 表情提示词计数器（按群/私聊统计 Bot 自然语言回复数，可选，为 nil 时禁用）
+	moodWindow *MoodWindow     // 表情情绪流滑动窗口（按群/私聊记录发图情绪与间隔轮数，注入提示词控制发图节奏，可选，为 nil 时禁用）
 	logger     *zap.Logger
 }
 
@@ -89,30 +89,25 @@ func (s *ChatService) SetUsageHook(hook llm.UsageHook) {
 	s.usageHook = hook
 }
 
-// SetReplyCounter 注入表情提示词计数器。
-// 注入后 System Prompt 会附带"当前计数{count}"，count 统计 Bot 在本群/私聊中
-// 发出的自然语言（LLM 触发）回复数；为 nil 时跳过注入（表情库插件未启用）。
-func (s *ChatService) SetReplyCounter(c *ReplyCounter) {
-	s.replyCount = c
-}
+// SetMoodWindow 注入表情情绪窗口（表情库插件注册完成后由 main 调用）。
+func (s *ChatService) SetMoodWindow(w *MoodWindow) { s.moodWindow = w }
 
-// IncReplyCount 在 Bot 完成一轮自然语言回复后调用，累加对应群/私聊作用域的计数。
-func (s *ChatService) IncReplyCount(scope string) {
-	if s.replyCount == nil {
-		return
+// TickMood 每轮纯文字 LLM 回复完成后调用，累计距上次发图的对话轮数。
+func (s *ChatService) TickMood(scope string) {
+	if s.moodWindow != nil {
+		s.moodWindow.Tick(scope)
 	}
-	s.replyCount.Inc(scope)
 }
 
-// ResetReplyCount 在 Bot 实际发表情后调用，清零对应群/私聊作用域的计数。
-func (s *ChatService) ResetReplyCount(scope string) {
-	if s.replyCount == nil {
-		return
+// RecordMood 本轮真实发出表情后调用（pick_sticker 命中且回复含图片 URL）：
+// 记录情绪标签并清零轮数计数。
+func (s *ChatService) RecordMood(scope, emotion string) {
+	if s.moodWindow != nil {
+		s.moodWindow.Record(scope, emotion)
 	}
-	s.replyCount.Reset(scope)
 }
 
-// replyScope 计算回复计数的会话作用域：群聊用 groupID，私聊用 "dm:"+平台用户ID。
+// replyScope 计算表情情绪窗口的会话作用域：群聊用 groupID，私聊用 "dm:"+平台用户ID。
 func replyScope(groupID, platformUserID string) string {
 	if groupID != "" {
 		return groupID
@@ -264,18 +259,14 @@ func (s *ChatService) assembleContext(ctx context.Context, req *llm.ChatRequest)
 	}
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: systemContent})
 
-	// ── 表情表达规则注入（表情提示词计数器，可选）──
-	// 计数器统计 Bot 在本群/私聊中发出的自然语言（LLM 触发）回复数，
-	// 以"当前计数{count}"告知 LLM 距上次发表情的对话间隔，控制发表情频率
-	// （约每五到十句一次，不过频也不完全不发）。
-	if s.replyCount != nil {
-		count := s.replyCount.Get(replyScope(req.GroupID, req.PlatformUserID))
+	// ── 表情表达规则注入（表情情绪流滑动窗口，可选）──
+	// 注入最近发表情的情绪历史与间隔轮数（MoodWindow.Snapshot），
+	// 让 LLM 参考记录自主控制发图节奏（别刷屏、别重复相近情绪，也别完全不发）。
+	if s.moodWindow != nil {
 		msgs = append(msgs, llm.Message{
 			Role: llm.RoleSystem,
-			Content: fmt.Sprintf(
-				"表情表达规则：当你遇到有对应表情库内的表情的时候，可以发表情（调用 pick_sticker 工具获取表情）来表达自己的感情。"+
-					"不要太过频繁，也不要完全不发，大约每五到十句由 LLM 触发的对话发一次表情。当前计数：%d。",
-				count),
+			Content: "表情表达规则：当你遇到有对应表情库内的表情的时候，可以发表情（调用 pick_sticker 工具获取表情）来表达自己的感情。" +
+				"不要太过频繁，也不要完全不发。参考最近的表情发送记录控制节奏。" + s.moodWindow.Snapshot(replyScope(req.GroupID, req.PlatformUserID)),
 		})
 	}
 
