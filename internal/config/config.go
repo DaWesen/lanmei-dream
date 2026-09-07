@@ -74,6 +74,24 @@ type PluginConfig struct {
 
 	// Builtins 内置业务插件开关（配置驱动注册，替代 main.go 硬编码注册）
 	Builtins PluginBuiltinsConfig `mapstructure:"builtins"`
+
+	// RandomBeauty 随机美图插件配置。
+	RandomBeauty RandomBeautyConfig `mapstructure:"random_beauty"`
+}
+
+// RandomBeautyConfig 随机美图插件配置。
+// 成人内容、擦边内容与 AI 图片过滤是不可关闭的代码级安全下限。
+type RandomBeautyConfig struct {
+	APIBaseURL               string  `mapstructure:"api_base_url"`
+	TimeoutSeconds           int     `mapstructure:"timeout_seconds"`
+	MaxAttempts              int     `mapstructure:"max_attempts"`
+	CooldownSeconds          int     `mapstructure:"cooldown_seconds"`
+	MaxImageBytes            int64   `mapstructure:"max_image_bytes"`
+	MinWidth                 int     `mapstructure:"min_width"`
+	MinHeight                int     `mapstructure:"min_height"`
+	MinBookmarks             int     `mapstructure:"min_bookmarks"`
+	SafeConfidence           float64 `mapstructure:"safe_confidence"`
+	ModerationTimeoutSeconds int     `mapstructure:"moderation_timeout_seconds"`
 }
 
 // PluginBuiltinsConfig 内置业务插件开关。
@@ -108,6 +126,8 @@ type PluginBuiltinsConfig struct {
 	AnswerQuestion bool `mapstructure:"answer_question"`
 	// DailyQuote 每日一句插件
 	DailyQuote bool `mapstructure:"daily_quote"`
+	// RandomBeauty 严格安全审核的 Pixiv 随机美图插件
+	RandomBeauty bool `mapstructure:"random_beauty"`
 }
 
 // DatabaseConfig 数据库配置
