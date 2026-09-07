@@ -3,11 +3,46 @@ package llm
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
+
+// opencodeSessionHeader / opencodeUserAgent OpenCode Go 网关要求的标识请求头。
+// 官方文档（https://opencode.ai/docs/go/）要求接入方：
+//  1. 明确标识自身（不要过于笼统的 user agent）；
+//  2. 携带 x-opencode-session 以优化提示词缓存。
+// 2026-09-06 起缺失该头的请求会被网关 400 拒绝（生产实测）。
+const (
+	opencodeSessionHeader = "x-opencode-session"
+	opencodeSessionValue  = "lanmei-bot"
+	opencodeUserAgent     = "lanmei-bot"
+)
+
+// opencodeTransport 为 OpenCode Go 网关请求附加标识头的 http.RoundTripper。
+// 覆盖该网关的全部出站请求（对话/流式/视觉），缺失头的请求会被 400 拒绝。
+type opencodeTransport struct {
+	base http.RoundTripper
+}
+
+func (t *opencodeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set(opencodeSessionHeader, opencodeSessionValue)
+	req.Header.Set("User-Agent", opencodeUserAgent)
+	return t.base.RoundTrip(req)
+}
+
+// withOpencodeHeaders 若 BaseURL 指向 OpenCode Go 网关，返回注入标识头的 HTTPClient；
+// 其他 provider（DeepSeek 官方等）返回 nil，行为不变。
+func withOpencodeHeaders(baseURL string) *http.Client {
+	if !strings.Contains(baseURL, "opencode.ai") {
+		return nil
+	}
+	return &http.Client{Transport: &opencodeTransport{base: http.DefaultTransport}}
+}
 
 // DisableThinkingOption 返回关闭推理模型思考的 eino Option。
 // 非流式 Chat 与流式直连路径（chatModel.Stream）共用，
@@ -51,6 +86,9 @@ func NewEinoClient(ctx context.Context, opts *EinoOptions) (*EinoClient, error) 
 		Model:       opts.Model,
 		MaxTokens:   &mt,
 		Temperature: &t,
+		// OpenCode Go 网关：注入标识头 HTTPClient（x-opencode-session + UA），
+		// 2026-09-06 起缺失会被 400 拒绝；其他 provider 该值为 nil 不生效
+		HTTPClient: withOpencodeHeaders(opts.BaseURL),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("llm: eino init: %w", err)
