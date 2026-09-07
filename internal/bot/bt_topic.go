@@ -18,6 +18,7 @@ import (
 	"github.com/zrurf/conduit"
 	"go.uber.org/zap"
 
+	"github.com/DaWesen/lanmei-dream/internal/ai"
 	"github.com/DaWesen/lanmei-dream/internal/ai/intent"
 	"github.com/DaWesen/lanmei-dream/internal/database"
 	"github.com/DaWesen/lanmei-dream/internal/model"
@@ -58,6 +59,12 @@ func (p *TopicGatePass) Execute(ctx *conduit.MessageContext) error {
 
 	// 合并 LLM 判断：一次调用同时返回意图与提及判定（at 命中时也走一遍，
 	// 以便意图路由；LLM 失败时结果降级为 chat，仅 at 仍可回复）。
+	// 防注入观测：消息命中注入模式时记 Warn（LLM 侧由 chat.go 安全规则兜底，这里做硬观测）。
+	if inj := ai.DetectInjection(msg.Content); inj != "" {
+		p.Logger.Warn("topic: 检测到疑似提示词注入",
+			zap.String("group", ctx.GroupID), zap.String("user", ctx.UserID),
+			zap.String("pattern", inj), zap.String("msg", truncate(ctx.RawMsg, 40)))
+	}
 	var judge *topic.LinguisticJudge
 	if p.Analyzer != nil && msg.Content != "" {
 		result, err := p.Analyzer.Analyze(ctx.Ctx, msg.Content, p.Manager.BuildJudgeContext(msg))
@@ -74,11 +81,13 @@ func (p *TopicGatePass) Execute(ctx *conduit.MessageContext) error {
 				zap.Bool("is_talking_to_bot", result.IsTalkingToBot),
 				zap.String("mention_role", result.MentionRole),
 				zap.Float64("mention_confidence", result.MentionConfidence),
+				zap.String("mention_evidence", result.MentionEvidence),
 			)
 			judge = &topic.LinguisticJudge{
 				IsTalkingToBot: result.IsTalkingToBot,
 				Role:           topic.MentionRole(result.MentionRole),
 				Confidence:     result.MentionConfidence,
+				Evidence:       result.MentionEvidence,
 			}
 			if judge.IsTalkingToBot && judge.Confidence <= 0 {
 				// LLM 省略了提及置信度时，回退用意图置信度

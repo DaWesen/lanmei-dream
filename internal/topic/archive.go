@@ -121,12 +121,23 @@ func (a *Archiver) Archive(ctx context.Context, snap *ArchiveSnapshot) error {
 		}
 	}
 
+	// 4. 群画像：归档事实三态合并进 group_facts（跨话题沉淀群级长期记忆）
+	if a.db != nil && len(facts) > 0 {
+		for i := range facts {
+			facts[i].Evidence = append(facts[i].Evidence, snap.ID)
+		}
+		if err := a.db.MergeGroupFacts(ctx, snap.GroupID, facts); err != nil {
+			a.logger.Warn("topic: 归档合并群画像失败", zap.String("topic", snap.ID), zap.Error(err))
+		}
+	}
+
 	a.logger.Info("topic: 话题已归档", zap.String("topic", snap.ID), zap.Int("msgs", len(snap.Window)), zap.String("label", label))
 	return nil
 }
 
-// summarize 通过 LLM 生成 brief/detailed/facts；无 LLM 或调用失败时降级。
-func (a *Archiver) summarize(ctx context.Context, snap *ArchiveSnapshot) (brief, detailed string, facts []string) {
+// summarize 通过 LLM 生成 brief/detailed/facts（facts 为带置信度的结构化事实）；
+// 无 LLM 或调用失败时降级（facts 返回 nil，不写群画像）。
+func (a *Archiver) summarize(ctx context.Context, snap *ArchiveSnapshot) (brief, detailed string, facts []model.FactItem) {
 	dialogue := truncateRunes(formatWindow(snap.Window), archiveMaxDialogueRunes)
 	defaultBrief := snap.Label
 	if defaultBrief == "" {
@@ -134,7 +145,7 @@ func (a *Archiver) summarize(ctx context.Context, snap *ArchiveSnapshot) (brief,
 	}
 
 	if a.llmClient == nil {
-		return defaultBrief, dialogue, snap.Members
+		return defaultBrief, dialogue, nil
 	}
 	resp, err := a.llmClient.Chat(ctx, &llm.ChatRequest{
 		Messages: []llm.Message{
@@ -143,23 +154,24 @@ func (a *Archiver) summarize(ctx context.Context, snap *ArchiveSnapshot) (brief,
 		},
 	})
 	if err != nil || resp == nil {
-		return defaultBrief, dialogue, snap.Members
+		return defaultBrief, dialogue, nil
 	}
 	var res archiveResult
 	if err := json.Unmarshal([]byte(resp.Content), &res); err != nil {
-		return defaultBrief, truncateRunes(resp.Content, 300), snap.Members
+		return defaultBrief, truncateRunes(resp.Content, 300), nil
 	}
+	facts = model.ParseFacts(res.Facts) // 兼容 []FactItem 与旧 []string
 	if strings.TrimSpace(res.Brief) == "" {
-		return defaultBrief, res.Detailed, res.Facts
+		return defaultBrief, res.Detailed, facts
 	}
-	return res.Brief, res.Detailed, res.Facts
+	return res.Brief, res.Detailed, facts
 }
 
 // archiveResult LLM 归档输出结构。
 type archiveResult struct {
-	Brief    string   `json:"brief"`
-	Detailed string   `json:"detailed"`
-	Facts    []string `json:"facts"`
+	Brief    string          `json:"brief"`
+	Detailed string          `json:"detailed"`
+	Facts    json.RawMessage `json:"facts"` // []FactItem（带置信度）；兼容旧 []string
 }
 
 // groupArchiveSystemPrompt 群聊话题归档 prompt（与个人 L1 压缩同构，输出严格 JSON）。
@@ -169,14 +181,16 @@ const groupArchiveSystemPrompt = `你是一个群聊话题记忆归档引擎。�
 {
   "brief": "一句话总结这个话题的核心内容（不超过50字）",
   "detailed": "详细摘要，保留关键事实、决策、参与者观点（不超过300字）",
-  "facts": ["结构化事实1", "结构化事实2"]
+  "facts": [{"key": "周末活动", "value": "张三(10001)提议周末去爬山", "confidence": 0.85}]
 }
 
 facts 规则：
 - 只提取客观事实，不提取寒暄/闲聊
-- 格式："张三(10001)提议周末去爬山"、"李四(10002)推荐了某家餐厅"
+- key：命题主题（2-6字，细粒度——同一 key 应只有一种取值，如"周末活动"、"餐厅推荐"）
+- value：每条事实不超过20字，格式如"张三(10001)提议周末去爬山"、"李四(10002)推荐了某家餐厅"
 - 发言者必须保留括号内的用户ID（稳定身份锚点），即使昵称后来改了也能对应到同一人
-- 每条事实不超过20字
+- confidence：0~1，表示该事实在本次对话中的确信度——明确陈述/重复提及 → 0.8~0.95；仅一次 → 0.6~0.8；间接 → 0.4~0.6
+- 每条事实都必须给 key、value、confidence，禁止省略或编造
 
 注意：只输出 JSON，不要任何额外文字。`
 

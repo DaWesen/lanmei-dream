@@ -56,7 +56,8 @@ func judgeStrong(conf float64) *LinguisticJudge {
 }
 
 func judgeWeak(conf float64) *LinguisticJudge {
-	return &LinguisticJudge{IsTalkingToBot: true, Role: RoleAffection, Confidence: conf}
+	// 弱证据角色（转述/指代）模拟弱提及：依赖上下文或语义推断，须高置信度才强提及
+	return &LinguisticJudge{IsTalkingToBot: true, Role: RoleRelay, Confidence: conf}
 }
 
 func groupTopics(m *Manager) []*Topic { return m.groups[m.groupKey("qq", testGroup)] }
@@ -172,6 +173,80 @@ func TestManagerReenterRecoversCoolingTopic(t *testing.T) {
 	}
 	if !d2.Topic.IsActive() {
 		t.Fatal("reenter should restore topic to active")
+	}
+}
+
+// TestManagerEvidenceRoleTiering 证据分档（借鉴"证据充分时放宽置信度门槛"）：
+// 强证据角色（直接称呼/情感对象等）+ 提供证据 → 置信度仅达弱阈值即按强提及直接回复；
+// 强证据角色但未提供证据 → 不享有放宽，按严格两档（无证据不强提）；
+// 弱证据角色（转述/指代）须达强阈值才强提及，否则按弱提及拉入。
+func TestManagerEvidenceRoleTiering(t *testing.T) {
+	m := testManager(nil, nil, nil)
+
+	// 强证据角色（affection）+ 提供证据 + 0.5（弱阈值档）→ 按强提及直接回复
+	d1 := m.HandleGroupMessage(context.Background(),
+		groupMsg(testGroup, "u1", "蓝莓我喜欢你"),
+		&LinguisticJudge{IsTalkingToBot: true, Role: RoleAffection, Confidence: 0.5, Evidence: "用户表达对蓝莓的情感"})
+	if !d1.Reply {
+		t.Fatal("strong evidence role with evidence and weak-threshold confidence should reply")
+	}
+
+	// 强证据角色（affection）+ 未提供证据 + 0.5 → 无证据不放宽：按弱提及拉入，不立即回复
+	d2 := m.HandleGroupMessage(context.Background(),
+		groupMsg(testGroup, "u1", "蓝莓我喜欢你"),
+		&LinguisticJudge{IsTalkingToBot: true, Role: RoleAffection, Confidence: 0.5})
+	if d2.Reply {
+		t.Fatal("strong evidence role WITHOUT evidence should not be relaxed to strong")
+	}
+
+	// 弱证据角色（relay）+ 0.5 → 弱提及：非成员拉入但不立即回复
+	d3 := m.HandleGroupMessage(context.Background(),
+		groupMsg(testGroup, "u2", "你们知道蓝妹吗"),
+		&LinguisticJudge{IsTalkingToBot: true, Role: RoleRelay, Confidence: 0.5})
+	if d3.Reply {
+		t.Fatal("weak evidence role with weak-threshold confidence should not reply immediately")
+	}
+	if d3.Topic == nil || !d3.Topic.isMember("u2") {
+		t.Fatal("weak evidence role should still pull user into topic")
+	}
+
+	// 弱证据角色（relay）+ 0.8（强阈值档）→ 强提及直接回复
+	d4 := m.HandleGroupMessage(context.Background(),
+		groupMsg(testGroup, "u2", "那你呢"),
+		&LinguisticJudge{IsTalkingToBot: true, Role: RoleRelay, Confidence: 0.8})
+	if !d4.Reply {
+		t.Fatal("weak evidence role with strong-threshold confidence should reply")
+	}
+}
+
+// TestManagerFollowUpRepliesWithoutMention 连续追问：@bot 问第一个问题并回复后，
+// 用户不 @ 继续追问（未被 LLM 判为提及），只要话题相关且回复配额有效 → 延续回复。
+// 解决"第一个问题明确提 bot、后续问题 bot 不解答"的对话断裂。
+func TestManagerFollowUpRepliesWithoutMention(t *testing.T) {
+	m := testManager(&config.TopicConfig{TopicWindowMsgs: 20, CoolingTimeoutMinutes: 1, CreditEnabled: true}, nil, nil)
+
+	// 第一条：@bot 强提及 → 创建话题并回复
+	d1 := m.HandleGroupMessage(context.Background(), groupMsg(testGroup, "u1", "@蓝妹 怎么查看积分", "bot_self"), nil)
+	if !d1.Reply || d1.Topic == nil {
+		t.Fatal("first @bot message should reply and create topic")
+	}
+	// 模拟 Bot 实际回复 → 授回复配额
+	m.RecordBotReply(context.Background(), "qq", testGroup, d1.Topic.ID, "bot_self", "u1", "回复1")
+
+	// 第二条：未提及（judge=nil，语义降级为成员制）→ 相关 + 有配额 → 延续回复
+	d2 := m.HandleGroupMessage(context.Background(), groupMsg(testGroup, "u1", "那具体怎么操作呢", "bot_self"), nil)
+	if !d2.Reply {
+		t.Fatal("follow-up without mention should reply when credit available")
+	}
+	if d2.Topic == nil || d2.Topic.ID != d1.Topic.ID {
+		t.Fatal("follow-up should continue same topic")
+	}
+
+	// 第三条：继续未提及追问 → Bot 回复后再授配额 → 继续回复
+	m.RecordBotReply(context.Background(), "qq", testGroup, d2.Topic.ID, "bot_self", "u1", "回复2")
+	d3 := m.HandleGroupMessage(context.Background(), groupMsg(testGroup, "u1", "好的，那其他群员也能看到吗", "bot_self"), nil)
+	if !d3.Reply {
+		t.Fatal("second follow-up without mention should keep replying")
 	}
 }
 

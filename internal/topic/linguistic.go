@@ -32,6 +32,17 @@ type LinguisticJudge struct {
 	IsTalkingToBot bool        // 是否在"跟机器人说话"（期望机器人回应）
 	Role           MentionRole // 提及角色
 	Confidence     float64     // 提及置信度 0~1
+	Evidence       string      // 提及判断依据（LLM 给出的可核实理由，用于证据分档与日志）
+}
+
+// strongEvidenceRole 强证据提及角色：直接称呼/让机器人做事/以机器人为对象表达情感——
+// 这类角色在结构上就明确"在跟机器人说话"，置信度只需达弱阈值即可按强提及处理
+// （弱阈值对应"证据充分但信心略低"，不必苛求高置信度）。
+var strongEvidenceRole = map[MentionRole]bool{
+	RoleVocative:      true, // 直接叫名字
+	RoleSubject:       true, // 机器人是句子主语
+	RoleImperativeObj: true, // 让机器人做事
+	RoleAffection:     true, // 情感/评价对象
 }
 
 // linguisticStrongThreshold 提及判断"强提及"置信度阈值（默认 0.7）。

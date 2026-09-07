@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/DaWesen/lanmei-dream/internal/model"
 )
@@ -207,4 +208,47 @@ func (db *DB) GetLODContext(ctx context.Context, userID int64, groupID string, b
 	}
 
 	return result, nil
+}
+
+// GetRecentFacts 收集用户最近的长期事实画像：合并 L2 TopicCluster 与 L1 EpisodeSummary
+// 中带置信度的事实，跨条目三态合并（重复确认提升置信度）后按置信度降序返回前 limit 条。
+//
+// 仅私聊维度（压缩只产生私聊摘要），供对话上下文注入"用户画像"。
+// 返回的事实未过滤低置信度，由消费端按 FactMinConfidence / FactThinConfidence 门槛处理。
+func (db *DB) GetRecentFacts(ctx context.Context, userID int64, limit int) ([]model.FactItem, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	topics, err := db.GetRecentTopics(ctx, userID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("get_recent_facts topics: %w", err)
+	}
+	episodes, err := db.GetRecentEpisodes(ctx, userID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("get_recent_facts episodes: %w", err)
+	}
+
+	var merged []model.FactItem
+	for _, t := range topics {
+		for _, f := range model.ParseFacts(t.Facts) {
+			if f.At.Before(t.CreatedAt) {
+				f.At = t.CreatedAt // 证据来源条目时间（供消费端"较早"标注）
+			}
+			merged = model.MergeFacts(merged, []model.FactItem{f})
+		}
+	}
+	for _, e := range episodes {
+		for _, f := range model.ParseFacts(e.Facts) {
+			if f.At.Before(e.CreatedAt) {
+				f.At = e.CreatedAt
+			}
+			merged = model.MergeFacts(merged, []model.FactItem{f})
+		}
+	}
+
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Confidence > merged[j].Confidence })
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, nil
 }

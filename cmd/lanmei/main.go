@@ -188,6 +188,11 @@ func main() {
 			}
 		}
 		logger.Info("AI 对话服务就绪")
+
+		// ── 记忆维护器：后台周期清理膨胀的对话表与超龄向量记忆 ──
+		// （群聊 L0 不参与压缩只增不减，memory_vectors 持续写入；按保留上限+时间衰减淘汰）
+		maintainer := ai.NewMemoryMaintainer(inf.DB, logger)
+		maintainer.Start(ctx)
 	} else {
 		logger.Warn("LLM 未配置，角色扮演不可用")
 	}
