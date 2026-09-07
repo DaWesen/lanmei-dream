@@ -187,6 +187,10 @@ func (a *Analyzer) Analyze(ctx context.Context, userMsg string, judgeCtx *JudgeC
 			{Role: llm.RoleSystem, Content: prompt},
 			{Role: llm.RoleUser, Content: user},
 		},
+		// 意图分类不需要推理，禁用思考：避免推理模型（如 deepseek-v4-flash）的
+		// 思考开销拖慢调用导致 8s 超时（opencode 网关下实测超时被 at 兜底救回，
+		// 但不 @ 时会把提及误判为未提及）。
+		DisableThinking: boolPtr(true),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("intent: llm call: %w", err)
@@ -412,3 +416,6 @@ func clamp01(v float64) float64 {
 	}
 	return v
 }
+
+// boolPtr 返回 bool 指针（ChatRequest 的可选字段用）。
+func boolPtr(b bool) *bool { return &b }
