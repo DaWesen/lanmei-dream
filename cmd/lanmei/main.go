@@ -295,6 +295,7 @@ func main() {
 	bizReg.SetVisionService(visionSvc)
 	bizReg.SetLLMClient(llmClient)
 	bizReg.SetQuizDir(cfg.Quiz.Dir)
+	bizReg.SetRandomBeautyConfig(cfg.Plugin.RandomBeauty)
 	// 海龟汤出题/判定 LLM 独立超时（默认 15s）：LLM 慢时快速降级回"汤煮糊了"，不耗尽消息预算
 	bizReg.SetTurtleSoupTimeout(time.Duration(cfg.Bot.TurtleSoupTimeoutSeconds) * time.Second)
 	if err := bizReg.RegisterBuiltins(); err != nil {

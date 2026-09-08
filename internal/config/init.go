@@ -156,6 +156,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("plugin.builtins.turtle_soup", true)
 	v.SetDefault("plugin.builtins.answer_question", true)
 	v.SetDefault("plugin.builtins.daily_quote", true)
+	v.SetDefault("plugin.builtins.random_beauty", true)
+	v.SetDefault("plugin.random_beauty.api_base_url", "https://i.mukyu.ru")
+	v.SetDefault("plugin.random_beauty.timeout_seconds", 18)
+	v.SetDefault("plugin.random_beauty.max_attempts", 2)
+	v.SetDefault("plugin.random_beauty.cooldown_seconds", 30)
+	v.SetDefault("plugin.random_beauty.max_image_bytes", 10*1024*1024)
+	v.SetDefault("plugin.random_beauty.min_width", 720)
+	v.SetDefault("plugin.random_beauty.min_height", 720)
+	v.SetDefault("plugin.random_beauty.min_bookmarks", 100)
+	v.SetDefault("plugin.random_beauty.safe_confidence", 0.9)
+	v.SetDefault("plugin.random_beauty.moderation_timeout_seconds", 8)
 
 	// 群聊 topic 系统默认值
 	v.SetDefault("bot.topic.enabled", true)

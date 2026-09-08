@@ -64,6 +64,20 @@ github_card = true # GitHub 链接卡片插件
 music = true       # 网易云点歌插件
 sticker = true     # 自定义表情库插件
 turtle_soup = true # 海龟汤文字游戏插件
+random_beauty = true # 严格安全审核的 Pixiv 随机美图插件
+
+# 随机美图：使用 Random Mage 兼容 API，安全过滤与视觉审核不可关闭
+[plugin.random_beauty]
+api_base_url = "https://i.mukyu.ru"
+timeout_seconds = 18 # 单次插件请求总预算，同时限制上游 HTTP；给 Conduit 留 2 秒收尾
+max_attempts = 2 # 获取、下载、文件校验或视觉审核失败时重试，硬上限 2
+cooldown_seconds = 30
+max_image_bytes = 10485760
+min_width = 720
+min_height = 720
+min_bookmarks = 100
+safe_confidence = 0.9
+moderation_timeout_seconds = 8
 
 # ============================================
 # 管理面板服务
