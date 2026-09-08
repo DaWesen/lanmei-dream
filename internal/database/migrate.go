@@ -42,6 +42,7 @@ func (db *DB) Migrate(ctx context.Context, vectorDim int) error {
 		&model.KnowledgeChunk{},
 		&model.StickerLibrary{},
 		&model.BotAdmin{},
+		&model.GroupFact{},
 		// 管理面板（Manager）专属表
 		&model.ManagerAdmin{},
 		&model.AuthCredential{},

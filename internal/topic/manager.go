@@ -185,11 +185,21 @@ func (m *Manager) HandleGroupMessage(ctx context.Context, msg *IncomingMsg, judg
 		}
 	}
 
-	// ── 3. 未提及但为成员：话题切换检测（语义不相关 → 脱离原话题）──
+	// ── 3. 未提及但为成员：话题切换检测 / 延续对话 ──
 	t := memberTopicOf(topics, msg.UserID)
 	if t != nil && msg.Content != "" {
 		if semanticRelevant(m, t, msg, vec, vecOK) {
-			m.continueChatLocked(t, msg, seq, now, vec, vecOK) // 仅入窗，不回复
+			m.continueChatLocked(t, msg, seq, now, vec, vecOK)
+			// 延续对话：Bot 刚回复过该成员（回复配额有效）→ 视为继续对话并回复，
+			// 而非仅入窗。解决"用户 @bot 问完第一个问题后连续追问"的场景——
+			// 后续消息即使未被 LLM 判定为提及（承接语如"那具体怎么操作呢"），
+			// 只要话题相关且配额有效就继续解答，避免对话断裂。
+			if m.hasCredit(t, msg.UserID) {
+				m.persistLocked(ctx, gk, topics)
+				m.logger.Info("topic: 成员延续对话（配额）→ 回复",
+					zap.String("group", gk), zap.String("user", msg.UserID), zap.String("topic", t.ID))
+				return &Decision{Reply: true, Topic: t, Mention: mention.Mode}
+			}
 		} else {
 			// 用户切换了话题：脱离原话题，成员清空则冷却
 			t.detachMember(msg.UserID)
@@ -211,12 +221,31 @@ func (m *Manager) HandleGroupMessage(ctx context.Context, msg *IncomingMsg, judg
 }
 
 // classifyMention 将 at 与 LLM 提及判定合并为强/弱/无三档提及。
-// at（平台 ID 精确命中）恒为强提及；其余按 judge.IsTalkingToBot 与置信度阈值划分。
+//
+// at（平台 ID 精确命中）恒为强提及；其余按 judge.IsTalkingToBot 与
+// 证据分档 + 置信度阈值划分：
+//   - 强证据角色（直接称呼/让做事/情感对象）**且提供了可核实证据（Evidence 非空）**：
+//     结构上已明确"在跟机器人说话"，置信度达弱阈值即可按强提及处理；
+//   - 其余（弱证据角色，或强证据角色但未提供证据）：严格按置信度两档
+//     （强 0.7 / 弱 0.4），证据缺失不享有门槛放宽。
+//
+// Evidence 缺失即按更严格门槛（对齐"证据必须可核实"：无证据不强提）。
 func (m *Manager) classifyMention(msg *IncomingMsg, judge *LinguisticJudge) MentionResult {
 	if msg != nil && containsString(msg.AtTargets, msg.SelfID) {
 		return MentionResult{Mentioned: true, Mode: MentionAt, Strong: true}
 	}
 	if judge != nil && judge.IsTalkingToBot {
+		if strongEvidenceRole[judge.Role] && judge.Evidence != "" {
+			// 强证据角色 + 有证据：达弱阈值即强提及；低于弱阈值但判为提及时按弱提及拉入
+			if judge.Confidence >= m.linguisticWeakThreshold() {
+				return MentionResult{Mentioned: true, Mode: MentionLinguistic, Strong: true}
+			}
+			if judge.Confidence > 0 {
+				return MentionResult{Mentioned: true, Mode: MentionLinguistic, Strong: false}
+			}
+			return MentionResult{}
+		}
+		// 弱证据角色，或强证据角色但未提供证据：原置信度两档（强 0.7 / 弱 0.4）
 		switch {
 		case judge.Confidence >= m.linguisticStrongThreshold():
 			return MentionResult{Mentioned: true, Mode: MentionLinguistic, Strong: true}
