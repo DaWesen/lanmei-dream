@@ -95,9 +95,27 @@ func (p *ThreeGPlugin) OnStop(_ *pluginpkg.PluginContext) error { return nil }
 // 条件判断
 // ============================================================
 
+// keyIsSegment 段落重入标记，与 bot 包 KeyIsSegment 同值（插件"不导包"，用字面量）。
+const keyIsSegment = "bot.is_segment"
+
+// isSegmentReentry 判断消息是否为蓝妹流式回复的段落重入消息。
+// 段落不作关键词触发源：否则插件抢占段落交付分支且出站段无人消费，回复静默丢失
+// （如介绍蒋建华必含 "23Go"，子串命中 "3G"）。
+func isSegmentReentry(ctx *conduit.MessageContext) bool {
+	if raw, ok := ctx.Extra[keyIsSegment]; ok {
+		if b, ok := raw.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
 // containsThreeG 判断消息原始文本是否包含关键词 "3G" 或 "3g"。
-// 事件消息（notice）无文本内容，自然不满足条件。
+// 事件消息（notice）无文本内容，自然不满足条件；段落重入消息不作触发源。
 func containsThreeG(ctx *conduit.MessageContext) bool {
+	if isSegmentReentry(ctx) {
+		return false
+	}
 	return strings.Contains(ctx.RawMsg, "3G") || strings.Contains(ctx.RawMsg, "3g")
 }
 
