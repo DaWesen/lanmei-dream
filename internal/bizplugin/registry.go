@@ -149,6 +149,11 @@ func (r *BusinessRegistry) RegisterBuiltins() error {
 		return err
 	}
 
+	// ── 招新群导航插件 ──
+	if err := register(builtins.ZhaoxinGroup, "zhaoxin_group", NewZhaoxinGroupPlugin(logger)); err != nil {
+		return err
+	}
+
 	// ── 签到积分排行榜插件 ──
 	if err := register(builtins.Rank, "signin_rank", NewRankPlugin(logger)); err != nil {
 		return err

@@ -106,6 +106,8 @@ type PluginBuiltinsConfig struct {
 	Poke bool `mapstructure:"poke"`
 	// ThreeG 3G 关键词科普插件
 	ThreeG bool `mapstructure:"three_g"`
+	// ZhaoxinGroup 招新群导航插件
+	ZhaoxinGroup bool `mapstructure:"zhaoxin_group"`
 	// Rank 签到积分排行榜插件
 	Rank bool `mapstructure:"rank"`
 	// Cat 猫猫图片插件
