@@ -2,7 +2,9 @@
 
 FROM golang:1.26-alpine AS builder
 
-RUN apk add --no-cache git
+# 国内网络加速：Alpine 包源替换为腾讯云镜像（默认 dl-cdn.alpinelinux.org 境外访问慢）
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.cloud.tencent.com#g' /etc/apk/repositories \
+    && apk add --no-cache git
 
 WORKDIR /app
 
@@ -20,7 +22,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /lanmei ./cmd/lanmei
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+# 国内网络加速：Alpine 包源替换为腾讯云镜像
+RUN sed -i 's#dl-cdn.alpinelinux.org#mirrors.cloud.tencent.com#g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 
