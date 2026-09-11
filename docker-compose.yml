@@ -136,7 +136,7 @@ services:
 
   # ── NapCat（NTQQ 平台 Provider，OneBot 11 方言，通过反向 WS 连接蓝妹）──
   napcat:
-    image: mlikiowa/napcat-docker:v4.18.13
+    image: mlikiowa/napcat-docker:v4.18.19
     container_name: napcat
     restart: unless-stopped
     environment:
