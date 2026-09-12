@@ -143,7 +143,7 @@ func isZhaoxinCommand(ctx *conduit.MessageContext) bool {
 
 // zhaoxinGroupMessage 招新群群号列表（固定文案）
 const zhaoxinGroupMessage = `✨ 蓝山工作室招新交流群 ✨
-📦 产品及运营部：1103609889
+📦 产品策划部：1103609889
 🎨 UI 设计部：741857248
 ☕ Java组：1105629671
 🌸 前端组：497827001
