@@ -25,12 +25,13 @@ type EinoEmbedder struct {
 
 // NewEinoEmbedder 创建 eino Embedding 客户端
 func NewEinoEmbedder(ctx context.Context, opts *EinoOptions) (*EinoEmbedder, error) {
-	dim := opts.Dimension
+	// 注意：不传 Dimensions。eino 会在请求体携带 dimensions 参数，
+	// 但硅基流动 /embeddings 不接受该参数（BAAI/bge-m3 固定输出 1024 维），
+	// 传了会返回 400 "The parameter is invalid"。
 	emb, err := openai.NewEmbedder(ctx, &openai.EmbeddingConfig{
-		BaseURL:    opts.BaseURL,
-		APIKey:     opts.APIKey,
-		Model:      opts.Model,
-		Dimensions: &dim,
+		BaseURL: opts.BaseURL,
+		APIKey:  opts.APIKey,
+		Model:   opts.Model,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("embedding: eino init: %w", err)
