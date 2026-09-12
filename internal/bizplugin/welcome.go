@@ -1,8 +1,12 @@
 package bizplugin
 
 import (
+	"context"
+	_ "embed"
 	"fmt"
+	"time"
 
+	"github.com/DaWesen/lanmei-dream/internal/media"
 	pluginpkg "github.com/DaWesen/lanmei-dream/internal/plugin"
 	"github.com/zrurf/conduit"
 	"go.uber.org/zap"
@@ -17,6 +21,8 @@ import (
 // 功能：
 //   - 新人入群（group_increase）时发送欢迎消息
 //   - 一条消息内 @ 新人 + 固定欢迎文案 + 固定图片（经出站段通道发送）
+//   - 图片内嵌于二进制、开机懒上传至 RustFS（内容寻址幂等），发送时预签名转 base64；
+//     RustFS 不可用时降级纯文本，不再依赖任何外链图床
 //   - 所有群都欢迎，不做按群配置、不做防刷限流
 //
 // 行为树：
@@ -30,12 +36,13 @@ import (
 // 事件信息读取：插件不依赖 bot/gateway 包，直接从黑板 Extra 读取事件键
 // （"bot.event.type" / "bot.event.data"，由 bot 层 OnMessage 写入）。
 type WelcomePlugin struct {
+	store  *media.ObjectStore // RustFS 对象存储（未配置时欢迎图降级为纯文本）
 	logger *zap.Logger
 }
 
 // NewWelcomePlugin 创建入群欢迎插件。
-func NewWelcomePlugin(logger *zap.Logger) *WelcomePlugin {
-	return &WelcomePlugin{logger: logger}
+func NewWelcomePlugin(store *media.ObjectStore, logger *zap.Logger) *WelcomePlugin {
+	return &WelcomePlugin{store: store, logger: logger}
 }
 
 // Info 返回入群欢迎插件元信息。
@@ -53,7 +60,7 @@ func (p *WelcomePlugin) Info() pluginpkg.PluginInfo {
 func (p *WelcomePlugin) OnInit(ctx *pluginpkg.PluginContext) error {
 	// 注册 Pass（依赖直接注入 Pass 结构体）
 	passID := pluginpkg.PassID("welcome", "welcome")
-	pass := &welcomePass{logger: p.logger}
+	pass := &welcomePass{store: p.store, logger: p.logger}
 
 	if err := ctx.Engine.RegisterPass(passID, pass); err != nil {
 		return fmt.Errorf("register welcome pass: %w", err)
@@ -105,8 +112,11 @@ const (
 // 插件按"不导包"约定直接使用字符串字面量。
 const sendSegmentsKey = "bot.send.segments" // []map[string]any OneBot 原生段列表（at/text/image 组合）
 
-// welcomeImageURL 欢迎配图（蓝山招新群固定图）。
-const welcomeImageURL = "http://blog-manmu.top/images/lanshan_welcome.png"
+// welcomeImage 欢迎配图（蓝山工作室 2026 秋季招新横幅）。
+// 内嵌于二进制：发送前懒上传 RustFS（内容寻址幂等），不再依赖外链图床。
+//
+//go:embed assets/welcome_joinus_2026.png
+var welcomeImage []byte
 
 // groupIncreaseEventType 规范化入群事件类型（对应 gateway 包的 EventTypeGroupIncrease）。
 const groupIncreaseEventType = "group_increase"
@@ -126,8 +136,10 @@ const welcomeMessage = "欢迎来到蓝山招新群！ヾ(≧▽≦*)o，有什�
 
 // welcomePass 发送欢迎消息：[@新人 + 固定文案 + 固定图片] 一条消息。
 // 经出站段通道（conduit.Set "bot.send.segments"）交给 bot 回调按段发送；
-// 事件缺 user_id（异常事件）时降级为纯文本欢迎语。
+// 事件缺 user_id（异常事件）时降级为纯文本欢迎语；
+// RustFS 未配置或图片上传/预签名失败时降级为 [@新人 + 文案]。
 type welcomePass struct {
+	store  *media.ObjectStore
 	logger *zap.Logger
 }
 
@@ -153,12 +165,47 @@ func (pass *welcomePass) Execute(ctx *conduit.MessageContext) error {
 		return nil
 	}
 
-	// 出站段：[@新人 + 固定文案 + 固定图片]，永远按 OneBot 12 语义组装（at 段用 user_id），
+	// 出站段：[@新人 + 固定文案 (+ 固定图片)]，永远按 OneBot 12 语义组装（at 段用 user_id），
 	// 协议差异（v11 的 at→qq、动作选择）由 bot 回调经 hub.SendSegments 收敛
-	conduit.Set(ctx, sendSegmentsKey, []map[string]any{
+	conduit.Set(ctx, sendSegmentsKey, buildWelcomeSegments(newUserID, content, pass.welcomeImageFile(ctx.Ctx)))
+	return nil
+}
+
+// buildWelcomeSegments 组装欢迎出站段。imageFile 为空时不附加图片段（纯文本降级）。
+func buildWelcomeSegments(newUserID, content, imageFile string) []map[string]any {
+	segs := []map[string]any{
 		{"type": "at", "data": map[string]any{"user_id": newUserID}},
 		{"type": "text", "data": map[string]any{"text": content}},
-		{"type": "image", "data": map[string]any{"file": welcomeImageURL}},
-	})
-	return nil
+	}
+	if imageFile != "" {
+		segs = append(segs, map[string]any{"type": "image", "data": map[string]any{"file": imageFile}})
+	}
+	return segs
+}
+
+// welcomeImageFile 取欢迎图的发送形式（base64 串或预签名 URL），失败时返回空串（降级纯文本）。
+// 流程：内嵌字节懒上传 RustFS（内容寻址幂等，重启/重复发送零成本）→ 预签名 10 分钟 →
+// 内网端点 URL 转 base64（NapCat 无法解析容器内网主机名，转换逻辑与 bot 层 sendReply 一致）。
+func (pass *welcomePass) welcomeImageFile(ctx context.Context) string {
+	if pass.store == nil {
+		pass.logger.Warn("welcome: RustFS 未配置，欢迎图跳过，降级纯文本")
+		return ""
+	}
+	key, err := pass.store.Put(ctx, welcomeImage, "image/png")
+	if err != nil {
+		pass.logger.Warn("welcome: 欢迎图上传失败，降级纯文本", zap.Error(err))
+		return ""
+	}
+	url, err := pass.store.Presign(ctx, key, 10*time.Minute)
+	if err != nil {
+		pass.logger.Warn("welcome: 欢迎图预签名失败，降级纯文本", zap.Error(err))
+		return ""
+	}
+	file := url
+	if uri, err := pass.store.ImageBase64FromURL(ctx, url); err != nil {
+		pass.logger.Warn("welcome: 内网图片转 base64 失败，按 URL 降级发送", zap.Error(err))
+	} else if uri != "" {
+		file = uri
+	}
+	return file
 }
