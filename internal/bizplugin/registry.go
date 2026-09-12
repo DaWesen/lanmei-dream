@@ -32,7 +32,7 @@ type BusinessRegistry struct {
 	registry           *pluginpkg.Registry          // 插件注册表
 	ncmURL             string                       // 网易云音乐 API 地址（点歌插件使用）
 	musicSendMode      string                       // 点歌发送方式：auto/card/link
-	store              *media.ObjectStore           // RustFS 对象存储（表情库插件使用，未配置时为 nil）
+	store              *media.ObjectStore           // RustFS 对象存储（表情库/入群欢迎插件使用，未配置时为 nil）
 	vision             *ai.VisionService            // 视觉理解服务（表情库自动打标使用，未配置时为 nil）
 	llmClient          llm.LLMClient                // LLM 客户端（海龟汤插件出题/判定使用，未配置时为 nil）
 	turtleSoupTimeout  time.Duration                // 海龟汤出题/判定 LLM 调用独立超时（<=0 不限制）
@@ -60,7 +60,7 @@ func (r *BusinessRegistry) SetMusicSendMode(mode string) {
 	r.musicSendMode = mode
 }
 
-// SetObjectStore 设置 RustFS 对象存储（表情库插件依赖；未配置时收藏功能不可用）。
+// SetObjectStore 设置 RustFS 对象存储（表情库/入群欢迎插件依赖；未配置时收藏与欢迎图不可用）。
 func (r *BusinessRegistry) SetObjectStore(store *media.ObjectStore) {
 	r.store = store
 }
@@ -135,7 +135,7 @@ func (r *BusinessRegistry) RegisterBuiltins() error {
 	}
 
 	// ── 入群欢迎插件 ──
-	if err := register(builtins.Welcome, "welcome", NewWelcomePlugin(logger)); err != nil {
+	if err := register(builtins.Welcome, "welcome", NewWelcomePlugin(r.store, logger)); err != nil {
 		return err
 	}
 
